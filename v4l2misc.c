@@ -42,7 +42,7 @@ vbuff               *buffers;
 unsigned int        num_buf;
 int                 force_format;
 
-enum io_method      io = -1;;
+enum io_method      io = -1;
 
 int w = 0;
 int h = 0;
@@ -505,7 +505,7 @@ static int get_v4l2_device_list(v4l2_id *list, enum v4l2_device_type dvtp, int s
                 strcat(nameofdevice,ep->d_name);
                 fd = open(nameofdevice, O_RDWR  | O_NONBLOCK, 0);
                 if (fd < 0) continue;
-                err = ioctl(fd, VIDIOC_QUERYCAP, &vcap); /// if there is no error, the device complies with V4L2 specification
+                err = xioctl(fd, VIDIOC_QUERYCAP, &vcap); /// if there is no error, the device complies with V4L2 specification
                 close(fd);
                 if (err) continue;
 
@@ -539,7 +539,7 @@ static void show_device_list(v4l2_id *dv, int show_num) { /// show_num is the nu
         sprintf(nameofdevice, "/dev/%s%d",prefixes[dv[i].typ],dv[i].num);
         fd = open(nameofdevice, O_RDWR  | O_NONBLOCK, 0);
         if (fd < 0) continue;
-        err = ioctl(fd, VIDIOC_QUERYCAP, &vcap);
+        err = xioctl(fd, VIDIOC_QUERYCAP, &vcap);
         close(fd);
         if (err) continue;
         printf("  %d: Type %s: %s, %s, %s\n", i, prefixes[dv[i].typ], nameofdevice, vcap.card, vcap.driver);
@@ -730,9 +730,9 @@ void close_v4l2_device(int fid_l) {
 int list_v4l2_capabilities(int fid_l) {
 
     int r;
-    struct v4l2_capability	    cap;
+    struct v4l2_capability cap;
 
-    r = ioctl(fid_l, VIDIOC_QUERYCAP, &cap);
+    r = xioctl(fid_l, VIDIOC_QUERYCAP, &cap);
 
     if(r != 0) {
 
@@ -799,7 +799,7 @@ int enumerate_video_standards(int fid_l) {
     printf("Enumerate supported video standards.\n");
     memset(&stdvid, 0, sizeof(stdvid));
     stdvid.index = idx;
-    while(ioctl(fid_l, VIDIOC_ENUMSTD, &stdvid) != -1) {
+    while(xioctl(fid_l, VIDIOC_ENUMSTD, &stdvid) != -1) {
 
         printf("\tIndex:\t%d.\n",stdvid.index);
         printf("\tIdentification:\t%d - It needs more details.\n", stdvid.id);
@@ -826,7 +826,7 @@ int enumerate_audio_input(int fid_l) {
 
     printf("Enumerate Audio inputs:\n");
     Iaudio.index = idx;
-    while(ioctl(fid_l, VIDIOC_ENUMAUDIO, &Iaudio) != -1) {
+    while(xioctl(fid_l, VIDIOC_ENUMAUDIO, &Iaudio) != -1) {
 
         printf("\tIndex:\t%d.\n",Iaudio.index);
         printf("\tName:\t%s.\n",Iaudio.name);
@@ -853,7 +853,7 @@ int enumerate_audio_output(int fid_l) {
 
     printf("Enumerate Audio outputs:\n");
     Oaudio.index = idx;
-    while(ioctl(fid_l, VIDIOC_ENUMAUDIO, &Oaudio) != -1) {
+    while(xioctl(fid_l, VIDIOC_ENUMAUDIO, &Oaudio) != -1) {
 
         printf("\tIndex:\t%d.\n",Oaudio.index);
         printf("\tName:\t%s.\n",Oaudio.name);
@@ -883,7 +883,7 @@ int enumerate_video_input(int fid_l){
 
     printf("Enumerate Video inputs:\n");
     iput.index = idx;
-    while(ioctl(fid_l, VIDIOC_ENUMINPUT, &iput) != -1) {
+    while(xioctl(fid_l, VIDIOC_ENUMINPUT, &iput) != -1) {
 
         printf("\tIndex:\t%d.\n",iput.index);
         printf("\tName:\t%s.\n",iput.name);
@@ -956,7 +956,7 @@ int enumerate_video_output(int fid_l) {
 
     printf("Enumerate Video outputs:\n");
     oput.index = idx;
-    while(ioctl(fid_l, VIDIOC_ENUMOUTPUT, &oput) != -1) {
+    while(xioctl(fid_l, VIDIOC_ENUMOUTPUT, &oput) != -1) {
 
         printf("\tIndex:\t%d.\n",oput.index);
         printf("\tName:\t%s.\n",oput.name);
@@ -1015,7 +1015,7 @@ void enumerate_menu(struct v4l2_query_ext_ctrl *qXctrl, int fid_l){
     memset(&qmenu, 0, sizeof(qmenu));
     qmenu.id = qXctrl->id;
     for (qmenu.index = qXctrl->minimum; qmenu.index <= qXctrl->maximum; qmenu.index++){
-        if (0 == ioctl(fid_l, VIDIOC_QUERYMENU, &qmenu)) {
+        if (0 == xioctl(fid_l, VIDIOC_QUERYMENU, &qmenu)) {
             printf("\t    %s\n", qmenu.name);
         }
     }
@@ -1031,7 +1031,7 @@ int enumerate_controls(int fid_l){
     memset(&qXctrl, 0, sizeof(qXctrl));
     qXctrl.id = V4L2_CTRL_FLAG_NEXT_CTRL | V4L2_CTRL_FLAG_NEXT_COMPOUND;
 
-    while (0 == ioctl(fid_l, VIDIOC_QUERY_EXT_CTRL, &qXctrl)) {
+    while (0 == xioctl(fid_l, VIDIOC_QUERY_EXT_CTRL, &qXctrl)) {
 
         if (!(qXctrl.flags & V4L2_CTRL_FLAG_DISABLED)) {
 
@@ -1058,7 +1058,7 @@ int enumerate_controls(int fid_l){
 
     for (qctrl.id = V4L2_CID_PRIVATE_BASE; ; qctrl.id++) {
 
-        if (0 == ioctl(fid_l, VIDIOC_QUERYCTRL, &qctrl)) {
+        if (0 == xioctl(fid_l, VIDIOC_QUERYCTRL, &qctrl)) {
 
             if (qctrl.flags & V4L2_CTRL_FLAG_DISABLED) continue;
             printf("\t%s, Max = %d, Min = %d, Step = %d\n", qctrl.name, qctrl.maximum, qctrl.minimum, qctrl.step);
@@ -1117,7 +1117,7 @@ int choose_or_enumerate_frame_intervals(int fid_l, struct v4l2_frmivalenum* flg,
 
     printf("%s", tab);
 
-    while (0 == ioctl(fid_l, VIDIOC_ENUM_FRAMEINTERVALS, &fl) && !(fl.type == V4L2_FRMIVAL_TYPE_CONTINUOUS || fl.type == V4L2_FRMIVAL_TYPE_STEPWISE))  {
+    while (0 == xioctl(fid_l, VIDIOC_ENUM_FRAMEINTERVALS, &fl) && !(fl.type == V4L2_FRMIVAL_TYPE_CONTINUOUS || fl.type == V4L2_FRMIVAL_TYPE_STEPWISE))  {
 
         switch(fl.type){
 
@@ -1157,7 +1157,7 @@ int choose_or_enumerate_frame_intervals(int fid_l, struct v4l2_frmivalenum* flg,
                 fl.width = flg->width;
                 fl.height = flg->height;
                 fl.index = choose_value(0, fl.index - 1, 1, "Interval index");
-                if(0 == ioctl(fid_l, VIDIOC_ENUM_FRAMEINTERVALS, &fl)){
+                if(0 == xioctl(fid_l, VIDIOC_ENUM_FRAMEINTERVALS, &fl)){
                     flg->discrete.numerator = fl.discrete.numerator;
                     flg->discrete.denominator = fl.discrete.denominator;
                 }else{
@@ -1193,7 +1193,7 @@ int choose_or_enumerate_frame_size(int fid_l, struct v4l2_frmivalenum* fl, int e
     memset(&fz, 0, sizeof(fz));
     fz.pixel_format = fl->pixel_format;
 
-    while (0 == ioctl(fid_l, VIDIOC_ENUM_FRAMESIZES, &fz) && !(fz.type == V4L2_FRMSIZE_TYPE_CONTINUOUS || fz.type == V4L2_FRMSIZE_TYPE_STEPWISE)) {
+    while (0 == xioctl(fid_l, VIDIOC_ENUM_FRAMESIZES, &fz) && !(fz.type == V4L2_FRMSIZE_TYPE_CONTINUOUS || fz.type == V4L2_FRMSIZE_TYPE_STEPWISE)) {
 
         if(!expanded){
             sprintf(num,"%d:",fz.index);
@@ -1236,7 +1236,7 @@ int choose_or_enumerate_frame_size(int fid_l, struct v4l2_frmivalenum* fl, int e
             case V4L2_FRMSIZE_TYPE_DISCRETE:
                 fz.pixel_format = fl->pixel_format;
                 fz.index = choose_value(0, fz.index - 1, 1, "size index");
-                if(0 == ioctl(fid_l, VIDIOC_ENUM_FRAMESIZES, &fz)){
+                if(0 == xioctl(fid_l, VIDIOC_ENUM_FRAMESIZES, &fz)){
                     fl->width = fz.discrete.width;
                     fl->height = fz.discrete.height;
                 }else{
@@ -1268,7 +1268,7 @@ int choose_or_enumerate_image_formats(int fid_l, struct v4l2_frmivalenum* fl, in
     memset(&fd, 0, sizeof(fd));
     fd.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-    while (0 == ioctl(fid_l, VIDIOC_ENUM_FMT, &fd)) {
+    while (0 == xioctl(fid_l, VIDIOC_ENUM_FMT, &fd)) {
 
         *((int*)p) = fd.pixelformat;
 
@@ -1300,7 +1300,7 @@ int choose_or_enumerate_image_formats(int fid_l, struct v4l2_frmivalenum* fl, in
     if(!expanded){
         fd.index = choose_value(0, fd.index - 1, 1, "Format index");
         fd.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if(0 == ioctl(fid_l, VIDIOC_ENUM_FMT, &fd)){
+        if(0 == xioctl(fid_l, VIDIOC_ENUM_FMT, &fd)){
             fl->pixel_format = fd.pixelformat;
         }else{
             errno_exit("VIDIOC_ENUM_FMT");
@@ -1322,13 +1322,13 @@ int set_image_format(int fid_l, __u32 format) {
     /// Get current format
     memset(&fm, 0, sizeof(fm));
     fm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (-1 == ioctl(fid_l, VIDIOC_G_FMT, &fm))
+    if (-1 == xioctl(fid_l, VIDIOC_G_FMT, &fm))
         errno_exit("VIDIOC_G_FMT");
 
     fm.fmt.pix.pixelformat        = format;
 
     /// Set new format
-    if (-1 == ioctl(fid_l, VIDIOC_S_FMT, &fm)){
+    if (-1 == xioctl(fid_l, VIDIOC_S_FMT, &fm)){
 
         errno_exit("VIDIOC_S_FMT");
 
@@ -1346,7 +1346,7 @@ int set_image_size(int fid_l, int iw, int ih) {
     /// Get current format
     memset(&fm, 0, sizeof(fm));
     fm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (-1 == ioctl(fid_l, VIDIOC_G_FMT, &fm))
+    if (-1 == xioctl(fid_l, VIDIOC_G_FMT, &fm))
         errno_exit("VIDIOC_G_FMT");
 
     fm.fmt.pix.width              = iw; ///fz.discrete.width;
@@ -1354,7 +1354,7 @@ int set_image_size(int fid_l, int iw, int ih) {
 
 
     /// Set new format
-    if (-1 == ioctl(fid_l, VIDIOC_S_FMT, &fm))
+    if (-1 == xioctl(fid_l, VIDIOC_S_FMT, &fm))
         errno_exit("VIDIOC_S_FMT");
 
 
@@ -1371,7 +1371,7 @@ int set_image_intervals(int fid_l, __u32 n, __u32 d) {
     /// Get current frame interval
     memset(&sp, 0, sizeof(sp));
     sp.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (-1 == ioctl(fid_l, VIDIOC_G_PARM, &sp))
+    if (-1 == xioctl(fid_l, VIDIOC_G_PARM, &sp))
             errno_exit("VIDIOC_G_PARM");
 
     if(n == 0){
@@ -1385,10 +1385,10 @@ int set_image_intervals(int fid_l, __u32 n, __u32 d) {
     sp.parm.capture.timeperframe.numerator = n; ///fl.discrete.numerator;
     sp.parm.capture.timeperframe.denominator = d; ///fl.discrete.denominator;
 
-    if (-1 == ioctl(fid_l, VIDIOC_S_PARM, &sp))
+    if (-1 == xioctl(fid_l, VIDIOC_S_PARM, &sp))
         errno_exit("VIDIOC_S_PARM");
 
-    if (-1 == ioctl(fid_l, VIDIOC_G_PARM, &sp))
+    if (-1 == xioctl(fid_l, VIDIOC_G_PARM, &sp))
             errno_exit("VIDIOC_G_PARM");
 
     return fid_l;
@@ -1436,13 +1436,13 @@ void show_video_format(int fid_l){
     /// Get current format
     memset(&fm, 0, sizeof(fm));
     fm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (-1 == ioctl(fid_l, VIDIOC_G_FMT, &fm))
+    if (-1 == xioctl(fid_l, VIDIOC_G_FMT, &fm))
         errno_exit("VIDIOC_G_FMT");
 
     /// Get current frame interval
     memset(&sp, 0, sizeof(sp));
     sp.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (-1 == ioctl(fid_l, VIDIOC_G_PARM, &sp))
+    if (-1 == xioctl(fid_l, VIDIOC_G_PARM, &sp))
             errno_exit("VIDIOC_G_PARM");
 
     *((int*)p) = fm.fmt.pix.pixelformat;
@@ -1665,7 +1665,7 @@ enum io_method check_io_method_busy(int fid_l){
         req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         req.memory = V4L2_MEMORY_USERPTR;
         req.count = 1;
-        if (-1 == ioctl (fid_l, VIDIOC_REQBUFS, &req)){
+        if (-1 == xioctl (fid_l, VIDIOC_REQBUFS, &req)){
             if (errno == EBUSY)
                 iom = -1;
             else
@@ -1676,7 +1676,7 @@ enum io_method check_io_method_busy(int fid_l){
         }
 
         req.count = 0;
-        if (-1 == ioctl (fid_l, VIDIOC_REQBUFS, &req)){
+        if (-1 == xioctl (fid_l, VIDIOC_REQBUFS, &req)){
             if (errno != EBUSY){
                 iom = -2;
                 ///printf("error in check_io_method_busy function\n");
@@ -1688,7 +1688,7 @@ enum io_method check_io_method_busy(int fid_l){
         req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         req.memory = V4L2_MEMORY_MMAP;
         req.count = 1;
-        if (-1 == ioctl (fid_l, VIDIOC_REQBUFS, &req)){
+        if (-1 == xioctl (fid_l, VIDIOC_REQBUFS, &req)){
             if (errno == EBUSY)
                 iom = -1;
             else
@@ -1699,7 +1699,7 @@ enum io_method check_io_method_busy(int fid_l){
         }
 
         req.count = 0;
-        if (-1 == ioctl (fid_l, VIDIOC_REQBUFS, &req)){
+        if (-1 == xioctl (fid_l, VIDIOC_REQBUFS, &req)){
             if (errno != EBUSY){
                 iom = -2;
                 ///printf("error in check_io_method_busy function\n");
@@ -1712,7 +1712,7 @@ enum io_method check_io_method_busy(int fid_l){
         req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         req.memory = V4L2_MEMORY_DMABUF;
         req.count = 4;
-        if (-1 == ioctl (fid_l, VIDIOC_REQBUFS, &req)){
+        if (-1 == xioctl (fid_l, VIDIOC_REQBUFS, &req)){
             if (errno == EINVAL)
                 printf("Video capturing or mmap-streaming is not supported\\n");
             else
@@ -1913,7 +1913,7 @@ void uninit_device(int fid_l) {
             req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             req.memory = V4L2_MEMORY_MMAP;
             req.count = 0;
-            if (-1 == ioctl (fid_l, VIDIOC_REQBUFS, &req)){
+            if (-1 == xioctl (fid_l, VIDIOC_REQBUFS, &req)){
                 if (errno != EBUSY){
                     printf("error in check_io_method_busy function\n");
                 }
