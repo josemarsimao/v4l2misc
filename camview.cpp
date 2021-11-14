@@ -974,24 +974,23 @@ int stop_view(vector<viod*> &vv){
 
 int is_displaying(vector<viod*> &vv){
 
-  vector<viod*>::iterator it;
-  vector<viod*>::iterator itf;
+    vector<viod*>::iterator it;
+    vector<viod*>::iterator itf;
 
-  it = vv.begin();
-  itf = vv.end();
+    it = vv.begin();
+    itf = vv.end();
 
-  do {
+    do {
 
-    if ((*it)->view == 1) {
-      return 1;
-    }
+        if ((*it)->view == 1) {
+          return 1;
+        }
 
-    it++;
+        it++;
 
+    } while( it != itf );
 
-  } while( it != itf );
-
-  return 0;
+    return 0;
 
 }
 
@@ -1006,7 +1005,7 @@ int update_cam_format(viod *p_vio){
 
     if (-1 == xioctl(p_vio->fid, VIDIOC_G_FMT, &fmto)) {
 
-        errno_exit("VIDIOC_G_FMT");
+        return -1;
 
     }
 
@@ -1056,14 +1055,19 @@ int add_camera(vector<viod*>& vv, int i){
     strcpy(p_vio->dvnm,(char *)vcap.card);
 
     if (-1 == update_cam_format(p_vio)) {
+
         close(p_vio->fid);
+
         if (p_vio) {
+
           delete(p_vio);
 
         }
-    }
-    else {
+
+    }else {
+
         vv.push_back(p_vio);
+
     }
 
     return 0;
@@ -1272,3 +1276,154 @@ void stop_all_threads(vector<viod*> &vv) {
     }
 
 }
+
+
+char* get_errno_description() {
+
+    int x;
+
+    switch (errno) {
+
+        case	EPERM:		/* 1	 Operation not permitted */
+
+                x = 1;
+
+        case	ENOENT:		/* 2	 No such file or directory */
+
+                x = 2;
+
+        case	ESRCH:		/* 3	 No such process */
+
+                x = 3;
+
+        case	EINTR:		/* 4	 Interrupted system call */
+
+                x = 0;
+
+        case	EIO: 		/* 5	 I/O error */
+
+                x = 0;
+
+        case	ENXIO:		/* 6	 No such device or address */
+
+                x = 0;
+
+        case	E2BIG:		/* 7	 Argument list too long */
+
+                x = 0;
+
+        case	ENOEXEC:	/* 8	 Exec format error */
+
+                x = 0;
+
+        case	EBADF:		/* 9	 Bad file number */
+
+                x = 0;
+
+        case	ECHILD:		/*10	 No child processes */
+
+                x = 0;
+
+        case	EAGAIN:		/*11	 Try again */
+
+                x = 0;
+
+        case	ENOMEM:		/*12	 Out of memory */
+
+                x = 0;
+
+        case	EACCES:		/*13	 Permission denied */
+
+                x = 0;
+
+        case	EFAULT:		/*14	 Bad address */
+
+                x = 0;
+
+        case	ENOTBLK:	/*15	 Block device required */
+
+                x = 0;
+
+        case	EBUSY:		/*16	 Device or resource busy */
+
+                x = 0;
+
+        case	EEXIST:		/*17	 File exists */
+
+                x = 0;
+
+        case	EXDEV:		/*18	 Cross-device link */
+
+                x = 0;
+
+        case	ENODEV:		/*19	 No such device */
+
+                x = 0;
+
+        case	ENOTDIR:	/*20	 Not a directory */
+
+                x = 0;
+
+        case	EISDIR:		/*21	 Is a directory */
+
+                x = 0;
+
+        case	EINVAL:		/*22	 Invalid argument */
+
+                x = 0;
+
+        case	ENFILE:		/*23	 File table overflow */
+
+                x = 0;
+
+        case	EMFILE:		/*24	 Too many open files */
+
+                x = 0;
+
+        case	ENOTTY:		/*25	 Not a typewriter */
+
+                x = 0;
+
+        case	ETXTBSY:	/*26	 Text file busy */
+
+                x = 0;
+
+        case	EFBIG:		/*27	 File too large */
+
+                x = 0;
+
+        case	ENOSPC:		/*28	 No space left on device */
+
+                x = 0;
+
+        case	ESPIPE:		/*29	 Illegal seek */
+
+                x = 0;
+
+        case	EROFS:		/*30	 Read-only file system */
+
+                x = 0;
+
+        case	EMLINK:		/*31	 Too many links */
+
+                x = 0;
+
+        case	EPIPE:		/*32	 Broken pipe */
+
+                x = 0;
+
+        case	EDOM:		/*33	 Math argument out of domain of func */
+
+                x = 0;
+
+        case	ERANGE:		/*34	 Math result not representable */
+
+                x = 0;
+
+
+    }
+
+    return 0;
+}
+
+
