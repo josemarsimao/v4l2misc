@@ -91,11 +91,11 @@ int cam_init_userp(viod *vd){
 
     struct v4l2_requestbuffers req;
 
-    memset(&req,0,sizeof(req));
+    CLEAR(req);
+
     req.count = 4;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_USERPTR;
-
 
     if (-1 == xioctl(vd->fid, VIDIOC_REQBUFS, &req)) {
 
@@ -129,7 +129,7 @@ int cam_init_userp(viod *vd){
 
     }
 
-    for (vd->num_buf = 0; vd->num_buf < 4; vd->num_buf++) {
+    for (vd->num_buf = 0; vd->num_buf < 4; ++vd->num_buf) {
 
         vd->buffers[vd->num_buf].length = vd->buffer_maxsize;
         vd->buffers[vd->num_buf].start = malloc(vd->buffer_maxsize);
@@ -162,7 +162,8 @@ int cam_init_mmap(viod *vd){
     struct v4l2_requestbuffers req;
     struct v4l2_buffer buf;
 
-    memset(&req,0,sizeof(req));
+    CLEAR(req);
+
     req.count = 4;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
@@ -200,9 +201,10 @@ int cam_init_mmap(viod *vd){
 
     }
 
-    for(vd->num_buf = 0; vd->num_buf < req.count; vd->num_buf++ ){
+    for(vd->num_buf = 0; vd->num_buf < req.count; ++vd->num_buf ){
 
-        memset(&buf,0,sizeof(buf));
+        CLEAR(buf);
+
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
         buf.index = vd->num_buf;
@@ -301,8 +303,7 @@ int cam_def_buffer_maxsize(viod *vd){
 
   struct v4l2_format fmt;
 
-  memset(&fmt,0,sizeof(fmt));
-
+  CLEAR(fmt);
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
   if(-1 == xioctl(vd->fid,VIDIOC_G_FMT,&fmt)){
@@ -347,13 +348,15 @@ int cam_start_capturing(viod *vd) {
             for (i = 0; i < vd->num_buf; ++i) {
 
                 CLEAR(buf);
+
                 buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
                 buf.memory = V4L2_MEMORY_MMAP;
                 buf.index = i;
 
                 if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
 
-                    errno_exit("error in VIDIOC_QBUF");
+                    get_errno_description();
+                    puts("error in VIDIOC_QBUF");
                     er = 1;
 
                 }
@@ -375,7 +378,7 @@ int cam_start_capturing(viod *vd) {
 
             }
 
-            if (!er) {
+            if (er) {
 
                 cam_stop_capturing(vd);
                 cam_uninit_device(vd);
@@ -390,6 +393,7 @@ int cam_start_capturing(viod *vd) {
             for (i = 0; i < vd->num_buf; ++i) {
 
                 CLEAR(buf);
+
                 buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
                 buf.memory = V4L2_MEMORY_USERPTR;
                 buf.index = i;
@@ -415,7 +419,7 @@ int cam_start_capturing(viod *vd) {
 
             }
 
-            if (!er) {
+            if (er) {
 
                 cam_stop_capturing(vd);
                 cam_uninit_device(vd);
@@ -533,6 +537,7 @@ int cam_read_frame(viod *vd) {
             return 0;
 
         case IO_METHOD_USERPTR:
+
             CLEAR(buf);
 
             buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -558,7 +563,7 @@ int cam_read_frame(viod *vd) {
 
             }
 
-            for (i = 0; i < vd->num_buf; i++)
+            for (i = 0; i < vd->num_buf; ++i)
                 if (buf.m.userptr == (unsigned long)vd->buffers[i].start && buf.length == vd->buffers[i].length)
                     break;
 
@@ -673,6 +678,7 @@ int cam_stop_capturing(viod *vd) {
 
         case IO_METHOD_MMAP:
         case IO_METHOD_USERPTR:
+
             type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             if (-1 == xioctl(vd->fid, VIDIOC_STREAMOFF, &type)) {
 
@@ -728,7 +734,7 @@ int cam_uninit_device(viod *vd) {
 
         case IO_METHOD_MMAP:
 
-            for (i = 0; i < vd->num_buf; i++){
+            for (i = 0; i < vd->num_buf; ++i){
 
                 if (-1 == munmap(vd->buffers[i].start, vd->buffers[i].length)) {
 
@@ -760,7 +766,7 @@ int cam_uninit_device(viod *vd) {
 
         case IO_METHOD_USERPTR:
 
-            for (i = 0; i < vd->num_buf; i++){
+            for (i = 0; i < vd->num_buf; ++i){
 
                 free(vd->buffers[i].start);
                 vd->buffers[i].start = 0;
@@ -841,7 +847,7 @@ void erase_process_initialization(viod &vd) {
     it = vd.v_mat.begin();
     it++;
     itf = vd.v_mat.end();
-    vd.v_mat.erase(itf, it);
+    vd.v_mat.erase(it, itf);
 
     /// It erases all objetcts of c_mat
     vd.c_mat.clear();
@@ -863,13 +869,31 @@ void* cam_thread_v4l2(void *vd){
   viod *p = (viod*) vd;
   Mat im(p->h,p->w,CV_8UC3);
 
+  p->thon = 1;
+  p->st = DEV_CAPTURING;
+
   gettimeofday(&(p->tm.t0),NULL);
+
+  p->tm.t1 = p->tm.t0;
+  p->tm.t2 = p->tm.t0;
+  p->tm.t3 = p->tm.t0;
+  p->tm.t4 = p->tm.t0;
+  p->tm.t5 = p->tm.t0;
+  p->tm.t6 = p->tm.t0;
+  p->tm.tx = p->tm.t0;
 
   p->v_mat.push_back(im);
 
   capture_pictures_v4l2(p);
+
   erase_process_initialization((*p));
 
+  p->st = DEV_OPEN;
+  CLEAR(p->tm);
+  p->procinit = 0;
+  p->procidx = 0;
+  p->img_proc = 0;
+  p->nv = 0;
 
   return 0;
 }
@@ -880,11 +904,10 @@ void* cam_thread_v4l2(void *vd){
 int free_v4l2_video_buffers(viod &vd){
 
   int r;
-
   struct v4l2_requestbuffers req;
 
+  CLEAR(req);
 
-  memset(&req,0,sizeof(req));
   req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req.memory = vd.io;
   req.count = 0;
@@ -903,30 +926,27 @@ int free_v4l2_video_buffers(viod &vd){
 
 int setting_camera_features(viod &vd){
 
+    struct v4l2_frmivalenum fl;
 
-  struct v4l2_frmivalenum fl;
+    if (vd.fid < 0) {
 
+        exit(1);
 
-  if (vd.fid < 0) {
-    exit(1);
-  }
+    }
 
-  choose_or_enumerate_image_formats(vd.fid,&fl,0);
-  choose_or_enumerate_frame_size(vd.fid,&fl,0);
-  choose_or_enumerate_frame_intervals(vd.fid,&fl,0);
-  set_image_format(vd.fid,fl.pixel_format);
-  set_image_size(vd.fid,fl.width,fl.height);
-  set_image_intervals(vd.fid,fl.discrete.numerator, fl.discrete.denominator);
-  vd.w = fl.width;
-  vd.h = fl.height;
-  vd.pxfmt = fl.pixel_format;
+    choose_or_enumerate_image_formats(vd.fid,&fl,0);
+    choose_or_enumerate_frame_size(vd.fid,&fl,0);
+    choose_or_enumerate_frame_intervals(vd.fid,&fl,0);
+    set_image_format(vd.fid,fl.pixel_format);
+    set_image_size(vd.fid,fl.width,fl.height);
+    set_image_intervals(vd.fid,fl.discrete.numerator, fl.discrete.denominator);
+    vd.w = fl.width;
+    vd.h = fl.height;
+    vd.pxfmt = fl.pixel_format;
+    free_v4l2_video_buffers(vd);
+    vd.st = DEV_CONFIGURED;
 
-  free_v4l2_video_buffers(vd);
-
-  vd.st = DEV_CONFIGURED;
-
-
-  return 0;
+    return 0;
 }
 
 
@@ -934,84 +954,75 @@ int setting_camera_features(viod &vd){
 
 int stop_view(vector<viod*> &vv){
 
+    /* Turn off the view feature of all cameras and return the index its. */
 
+    int d;
+    vector<viod*>::iterator it;
 
-  int d;
+    d = -1;
+    it = vv.begin();
 
-  vector<viod*>::iterator __first;
-  vector<viod*>::iterator it;
-  vector<viod*>::iterator itf;
-  long local_10;
+    while( it != vv.end() ) {
 
+        if ((*it)->view != 0) {
 
-  d = -1;
-  it = vv.begin();
-  itf = vv.end();
+            d = distance(vv.begin(), it);
 
-  while( it != itf ) {
+        }
 
-
-    if ((*it)->view != 0) {
-      __first = vv.begin();
-
-      d = distance(__first, it);
-
-
+        (*it)->view = 0;
+        it++;
 
     }
 
-    (*it)->view = 0;
-
-    it++;
-
-  }
-
-
-
-  return d;
+    return d;
 }
 
 
 int is_displaying(vector<viod*> &vv){
 
-    vector<viod*>::iterator it;
-    vector<viod*>::iterator itf;
+    if(vv.size()){
 
-    it = vv.begin();
-    itf = vv.end();
+        vector<viod*>::iterator it;
 
-    do {
+        it = vv.begin();
 
-        if ((*it)->view == 1) {
-          return 1;
+        while( it != vv.end() ) {
+
+            if ( (*it)->view == 1) {
+
+                return 1;
+
+            }
+
+            it++;
+
         }
 
-        it++;
-
-    } while( it != itf );
+    }
 
     return 0;
 
 }
 
 
-
-
 int update_cam_format(viod *p_vio){
 
-    struct v4l2_format fmto;
-    CLEAR(fmto);
-    fmto.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    struct v4l2_format fm;
 
-    if (-1 == xioctl(p_vio->fid, VIDIOC_G_FMT, &fmto)) {
+    CLEAR(fm);
+
+    fm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+    if (-1 == xioctl(p_vio->fid, VIDIOC_G_FMT, &fm)) {
 
         return -1;
 
     }
 
-    p_vio->h = fmto.fmt.pix.height;
-    p_vio->w = fmto.fmt.pix.width;
-    p_vio->pxfmt = fmto.fmt.pix.pixelformat;
+    p_vio->h = fm.fmt.pix.height;
+    p_vio->w = fm.fmt.pix.width;
+    p_vio->pxfmt = fm.fmt.pix.pixelformat;
 
     return 0;
 }
@@ -1046,7 +1057,7 @@ int add_camera(vector<viod*>& vv, int i){
         p_vio->st = DEV_OPEN;
     }
 
-    memset(&vcap,0,sizeof(vcap));
+    CLEAR(vcap);
 
     if(-1 == xioctl(p_vio->fid,VIDIOC_QUERYCAP,&vcap)){
         errno_exit("VIDIOC_QUERYCAP");
@@ -1079,13 +1090,11 @@ int make_camera_list(vector<viod*>& vv) {
     int dev_num;
     int i;
     int cnt;
+    char ck [MAX_V4L2_DEV_NUM];
+    viod* vp;
 
     vector<viod*>::iterator it;
     vector<viod*>::iterator itf;
-
-    viod* vp;
-
-    char ck [MAX_V4L2_DEV_NUM];
 
     memset(ck,0,MAX_V4L2_DEV_NUM);
 
@@ -1213,18 +1222,11 @@ int make_camera_list(vector<viod*>& vv) {
 }
 
 
-
-
 int show_camera_list(vector<viod*>& vv, int dvst){
 
-    unsigned char bnum;
-    const char *status;
     int r;
-    int sz;
-
     int i;
     int cnt;
-    int err;
     vector<viod*>::iterator it;
     vector<viod*>::iterator itf;
     char name [256];
@@ -1232,9 +1234,10 @@ int show_camera_list(vector<viod*>& vv, int dvst){
 
     i = 0;
     cnt = 0;
-    printf("\x1b[H\x1b[J");
-    sz = vv.size();
-    if (sz == 0) {
+    ///printf("\x1b[H\x1b[J");
+    SCRCLR();
+
+    if (!vv.size()) {
         puts("\tThere is no video device to show.\n");
         cnt = 0;
     }
@@ -1242,22 +1245,31 @@ int show_camera_list(vector<viod*>& vv, int dvst){
         puts("\n\nVideo Cameras List:\n");
         it = vv.begin();
         itf = vv.end();
-        do{
-            bnum = (*it)->vid.num;
-            sprintf(name,"/dev/%s%d",prefixes[(*it)->vid.typ], bnum);
-            r = xioctl((*it)->fid,VIDIOC_QUERYCAP,&vcap);
-            if (r == 0) {
-                status = cam_status[(*it)->st];
-                printf("  %d: %s: %s, %s, %s\n", i, prefixes[(*it)->vid.typ], name, vcap.card, status);
-                cnt = cnt + 1;
+
+        while (it != itf) {
+            if (dvst == DEV_ALL || ((*it)->st & dvst) != 0){
+
+                sprintf(name, "/dev/%s%d", prefixes[(*it)->vid.typ], (*it)->vid.num);
+                r = xioctl((*it)->fid,VIDIOC_QUERYCAP,&vcap);
+                if (r == 0) {
+                    printf("  %d: %s: %s, %s, %s\n", i, prefixes[(*it)->vid.typ], name, vcap.card, cam_status[(*it)->st]);
+                    cnt = cnt + 1;
+                    it++;
+                    i = i + 1;
+                }
+
+            }else{
+
+                it++;
                 i = i + 1;
+
             }
-
-            it++;
-
-        }while(it != itf);
+        }
     }
+
+    return cnt;
 }
+
 
 
 void stop_all_threads(vector<viod*> &vv) {
@@ -1278,7 +1290,7 @@ void stop_all_threads(vector<viod*> &vv) {
 }
 
 
-char* get_errno_description() {
+void get_errno_description() {
 
     int x;
 
@@ -1423,7 +1435,7 @@ char* get_errno_description() {
 
     }
 
-    return 0;
+    //return 0;
 }
 
 

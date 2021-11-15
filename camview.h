@@ -131,7 +131,32 @@ typedef struct _video_io_device{
 } viod;
 
 
-
+/*
+    int x0 = sizeof(vio.tid)        	    8	    8	0x08
+    int x1 = sizeof(vio.vid)        	    8	    16	0x10
+    int x2 = sizeof(vio.fid)        	    4	    20	0x14
+    int x3 = sizeof(vio.io)         	    4	    24	0x18
+    int x4 = sizeof(vio.st)         	    4	    28	0x1C
+    int x5 = sizeof(vio.buffers)       	    8	    36	0x24
+    int x6 = sizeof(vio.bon)        	    4	    40	0x28
+    int x7 = sizeof(vio.num_buf)    	    4	    44	0x2C
+    int x8 = sizeof(vio.w)          	    4	    48	0x30
+    int x9 = sizeof(vio.h)          	    4	    52	0x34
+    int x10 = sizeof(vio.img_proc)    	    8	    60	0x3C
+    int x11 = sizeof(vio.procidx    	    4	    64	0x40
+    int x12 = sizeof(vio.buffer_maxsize)	4	    68	0x44
+    int x13 = sizeof(vio.view)          	4	    72	0x48
+    int x14 = sizeof(vio.thon)          	4	    76	0x4C
+    int x15 = sizeof(vio.xbuf)          	8	    84	0x54
+    int x16 = sizeof(vio.tm)            	136	    220	0xDC
+    int x17 = sizeof(vio.c_mat)         	24	    244	0xF4
+    int x18 = sizeof(vio.v_mat)         	24	    268	0x10C
+    int x19 = sizeof(vio.d_vet)         	24	    292	0x124
+    int x20 = sizeof(vio.nv)            	4	    296	0x128
+    int x21 = sizeof(vio.procinit)      	4	    300	0x12C
+    int x22 = sizeof(vio.pxfmt)         	4	    304	0x130
+    int x23 = sizeof(vio.dvnm)          	32	    336	0x150
+*/
 
 
 
@@ -160,5 +185,7 @@ int stop_view(vector<viod*> &vv);
 void stop_all_threads(vector<viod*> &vv);
 int cam_deallocate_xbuf(viod &vd);
 void erase_process_initialization(viod &vd);
+
+void get_errno_description();
 
 #endif // CAMVIEW_H_INCLUDED
