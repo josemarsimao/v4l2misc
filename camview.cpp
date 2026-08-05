@@ -951,6 +951,33 @@ int setting_camera_features(viod &vd){
 
 
 
+int view_on(vector<viod*> &vv){
+
+    /* Return the index of camera that has view on. */
+
+    int d;
+    vector<viod*>::iterator it;
+
+    d = -1;
+    it = vv.begin();
+
+    while( it != vv.end() ) {
+
+        if ((*it)->view != 0) {
+
+            d = distance(vv.begin(), it);
+
+        }
+
+        it++;
+
+    }
+
+    return d;
+}
+
+
+
 
 int stop_view(vector<viod*> &vv){
 

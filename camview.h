@@ -121,7 +121,8 @@ typedef struct _video_io_device{
     vector<Mat>         v_mat;                              /// images for calculations and display
     vector<dany>        d_vet;                              /// pointers to objects
 
-    int                 nv = 0;                             /// number view - number of image to show
+    int                 nv = 0;                             /// number view - number of image to show from the processed images list
+
     int                 procinit = 0;                       /// control process initialization
 
     __u32               pxfmt = 0;                          /// pixel format
@@ -182,6 +183,7 @@ int free_v4l2_video_buffers(viod &vd);
 int cam_uninit_device(viod *vd);
 int cam_stop_capturing(viod *vd);
 int stop_view(vector<viod*> &vv);
+int view_on(vector<viod*> &vv);
 void stop_all_threads(vector<viod*> &vv);
 int cam_deallocate_xbuf(viod &vd);
 void erase_process_initialization(viod &vd);
