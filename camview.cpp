@@ -1,18 +1,6 @@
 #include "camview.h"
 
 
-
-/// STATUS
-/*
-#define        DEV_NONE         0
-#define        DEV_BUSY         1
-#define        DEV_OPEN         2
-#define        DEV_CONFIGURED   4
-#define        DEV_OUR          8
-#define        DEV_CAPTURING    16
-#define        DEV_PROCESSING   32
-#define        DEV_ALL          64
-*/
 const char *cam_status[] = {
     "NONE",
     "BUSY",
@@ -88,9 +76,7 @@ int cam_init_dma(viod *vd) {
 }
 
 int cam_init_userp(viod *vd){
-
     struct v4l2_requestbuffers req;
-
     CLEAR(req);
 
     req.count = 4;
@@ -98,70 +84,51 @@ int cam_init_userp(viod *vd){
     req.memory = V4L2_MEMORY_USERPTR;
 
     if (-1 == xioctl(vd->fid, VIDIOC_REQBUFS, &req)) {
+        // Alinhado com a nova abordagem de diagnóstico explicativo
+        explain_v4l2_error("Alocação de buffers via User Pointer (VIDIOC_REQBUFS)");
 
         if (EINVAL == errno) {
-
             fprintf(stderr, "Device does not support user pointer i/o\n");
             exit(EXIT_FAILURE);
-
         } else {
-
             errno_exit("error in memory buffer allocation VIDIOC_REQBUFS");
-
         }
     }
 
     if (req.count < 2) {
-
         free_v4l2_video_buffers((*vd));
         fprintf(stderr, "Insufficient buffer memory on device\n");
         exit(EXIT_FAILURE);
-
     }
 
     vd->buffers = (vbuff *)calloc(4,sizeof(vbuff));
-
     if (!vd->buffers){
-
         free_v4l2_video_buffers((*vd));
         fprintf(stderr, "Out of memory\n");
         exit(EXIT_FAILURE);
-
     }
 
     for (vd->num_buf = 0; vd->num_buf < 4; ++vd->num_buf) {
-
         vd->buffers[vd->num_buf].length = vd->buffer_maxsize;
         vd->buffers[vd->num_buf].start = malloc(vd->buffer_maxsize);
 
         if (!vd->buffers[vd->num_buf].start) {
-
             fprintf(stderr, "Out of memory\n");
             while(vd->num_buf){
-
                 vd->num_buf--;
                 free(vd->buffers[vd->num_buf].start);
-
             }
             free(vd->buffers);
             free_v4l2_video_buffers((*vd));
             exit(EXIT_FAILURE);
-
         }
-
-
     }
-
     return 0;
 }
 
-
-
 int cam_init_mmap(viod *vd){
-
     struct v4l2_requestbuffers req;
     struct v4l2_buffer buf;
-
     CLEAR(req);
 
     req.count = 4;
@@ -169,90 +136,63 @@ int cam_init_mmap(viod *vd){
     req.memory = V4L2_MEMORY_MMAP;
 
     if (-1 == xioctl(vd->fid, VIDIOC_REQBUFS, &req)) {
-
+        explain_v4l2_error("Alocação inicial de buffers MMAP no driver (VIDIOC_REQBUFS)");
         if (EINVAL == errno) {
-
             fprintf(stderr, "Device does not support memory mapping\n");
             exit(EXIT_FAILURE);
-
         } else {
-
             errno_exit("error in memory buffer allocation VIDIOC_REQBUFS");
-
         }
-
     }
 
     if (req.count < 2) {
-
         free_v4l2_video_buffers((*vd));
         fprintf(stderr, "Insufficient buffer memory on device\n");
         exit(EXIT_FAILURE);
-
     }
 
     vd->buffers = (vbuff *)calloc(req.count,sizeof(vbuff));
-
     if (!vd->buffers){
-
         free_v4l2_video_buffers((*vd));
         fprintf(stderr, "Out of memory\n");
         exit(EXIT_FAILURE);
-
     }
 
     for(vd->num_buf = 0; vd->num_buf < req.count; ++vd->num_buf ){
-
         CLEAR(buf);
-
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
         buf.index = vd->num_buf;
 
-        if (-1 == xioctl(vd->fid,VIDIOC_QUERYBUF,&buf))
+        if (-1 == xioctl(vd->fid, VIDIOC_QUERYBUF, &buf)) {
+            explain_v4l2_error("Consulta de propriedades do buffer MMAP para mapeamento (VIDIOC_QUERYBUF)");
             errno_exit("error reading memory buffer features VIDIOC_QUERYBUF");
-
-
+        }
 
         vd->buffers[vd->num_buf].length = buf.length;
         vd->buffers[vd->num_buf].start = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, vd->fid, buf.m.offset);
 
-
         if (vd->buffers[vd->num_buf].start == MAP_FAILED){
-
+            explain_v4l2_error("Mapeamento físico de memória via chamada mmap()");
             fprintf(stderr, "Memory mapping error\n");
 
             while (vd->num_buf) {
-
                 if (-1 == munmap(vd->buffers[vd->num_buf].start,vd->buffers[vd->num_buf].length)) {
-
                     errno_exit("error when unmapping memory");
-
                 }
-
                 vd->num_buf--;
-
             }
-
             free(vd->buffers);
             free_v4l2_video_buffers((*vd));
             exit(EXIT_FAILURE);
-
         }
 
         if (vd->buffer_maxsize < buf.length) {
-
             vd->buffer_maxsize = buf.length;
-
         }
-
     }
-
     return 0;
 }
-
-
-
 
 int cam_init_read(viod *vd){
 
@@ -300,23 +240,21 @@ int cam_init_device(viod *vd){
 
 
 int cam_def_buffer_maxsize(viod *vd){
+    struct v4l2_format fmt;
+    CLEAR(fmt);
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-  struct v4l2_format fmt;
+    if(-1 == xioctl(vd->fid, VIDIOC_G_FMT, &fmt)){
+        explain_v4l2_error("Leitura do formato atual da câmera para dimensionamento do buffer (VIDIOC_G_FMT)");
+        puts("error reading format features");
+        errno_exit("VIDIOC_G_FMT");
+    }
 
-  CLEAR(fmt);
-  fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
-  if(-1 == xioctl(vd->fid,VIDIOC_G_FMT,&fmt)){
-
-    puts("error reading format features");
-    errno_exit("VIDIOC_G_FMT");
-
-  }
-
-  vd->buffer_maxsize = fmt.fmt.pix.sizeimage;
-
-  return 0;
+    vd->buffer_maxsize = fmt.fmt.pix.sizeimage;
+    return 0;
 }
+
+
 
 
 int cam_allocate_xbuf(viod *vd) {
@@ -330,14 +268,11 @@ int cam_allocate_xbuf(viod *vd) {
   return 0;
 }
 
-
 int cam_start_capturing(viod *vd) {
-
     unsigned int i;
     int er = 0;
     enum v4l2_buf_type type;
     struct v4l2_buffer buf;
-
 
     switch (vd->io) {
         case IO_METHOD_READ:
@@ -346,54 +281,40 @@ int cam_start_capturing(viod *vd) {
 
         case IO_METHOD_MMAP:
             for (i = 0; i < vd->num_buf; ++i) {
-
                 CLEAR(buf);
-
                 buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
                 buf.memory = V4L2_MEMORY_MMAP;
                 buf.index = i;
 
                 if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
-
-                    get_errno_description();
+                    // Substituição direta da chamada antiga pela nova abordagem rica
+                    explain_v4l2_error("Enfileiramento inicial de buffers MMAP (VIDIOC_QBUF)");
                     puts("error in VIDIOC_QBUF");
                     er = 1;
-
                 }
-
             }
 
             type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
             if (-1 == xioctl(vd->fid, VIDIOC_STREAMON, &type)) {
-
-                errno_exit("error starting stream VIDIOC_STREAMON");
+                explain_v4l2_error("Ativação da transmissão de streaming de vídeo (VIDIOC_STREAMON)");
 
                 if (ENOSPC == errno) {
-
-                    errno_exit("There is no bandwidth enough. Try other formar, size or another controller");
-                    er = 1;
-
+                    fprintf(stderr, "Erro específico: Sem largura de banda USB suficiente no barramento.\n");
                 }
-
+                errno_exit("error starting stream VIDIOC_STREAMON");
+                er = 1;
             }
 
             if (er) {
-
                 cam_stop_capturing(vd);
                 cam_uninit_device(vd);
                 return -1;
-
             }
-
             break;
 
         case IO_METHOD_USERPTR:
-
             for (i = 0; i < vd->num_buf; ++i) {
-
                 CLEAR(buf);
-
                 buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
                 buf.memory = V4L2_MEMORY_USERPTR;
                 buf.index = i;
@@ -401,111 +322,74 @@ int cam_start_capturing(viod *vd) {
                 buf.length = vd->buffers[i].length;
 
                 if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
-
+                    explain_v4l2_error("Enfileiramento inicial de buffers User Pointer (VIDIOC_QBUF)");
                     errno_exit("error in VIDIOC_QBUF");
                     er = 1;
-
                 }
-
             }
 
             type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
             if (-1 == xioctl(vd->fid, VIDIOC_STREAMON, &type)) {
-
+                explain_v4l2_error("Ativação da transmissão via User Pointer (VIDIOC_STREAMON)");
                 errno_exit("error starting stream VIDIOC_STREAMON");
-                errno_exit("There is no bandwidth enough. Try other formar, size or another controller");
                 er = 1;
-
             }
 
             if (er) {
-
                 cam_stop_capturing(vd);
                 cam_uninit_device(vd);
                 return -1;
-
             }
-
             break;
 
         case IO_METHOD_DMABUF:
-
             return -1;
-
-
     }
-
     return er;
 }
 
-
 int cam_read_frame(viod *vd) {
-
     struct v4l2_buffer buf;
     unsigned int i;
 
     switch (vd->io) {
-
         case IO_METHOD_READ:
-
             if (-1 == read(vd->fid,vd->buffers->start,vd->buffers->length)) {
-
                 switch (errno) {
-
                     case EAGAIN:
                         return -2;
-
                     case EIO:
-                        /* Could ignore EIO, see spec. */
-
-                        /* fall through */
-
                     default:
+                        explain_v4l2_error("Tentativa de leitura direta via chamada read()");
                         errno_exit("read");
-
                 }
-
                 return -2;
-
             }
-
             vd->bon = 0;
             cam_process_image((*vd));
-
             return 0;
 
         case IO_METHOD_MMAP:
-
             CLEAR(buf);
-
             buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             buf.memory = V4L2_MEMORY_MMAP;
 
             if (-1 == xioctl(vd->fid, VIDIOC_DQBUF, &buf)) {
-
+                if (errno != EAGAIN) { // Ignora mensagens repetitivas se for apenas o driver dizendo "ainda não capturei"
+                    explain_v4l2_error("Retirada de buffer processado da fila do driver (VIDIOC_DQBUF)");
+                }
                 switch (errno) {
                     case EAGAIN:
-                        errno_exit("error found");
                         return -2;
-
                     case EIO:
-                        // Could ignore EIO, see spec.
-
-                        // fall through
-
                     default:
                         errno_exit("VIDIOC_DQBUF");
                 }
-
-                errno_exit("error found");
-
             }
 
             assert(buf.index < vd->num_buf);
-
             vd->bon = buf.index;
-            vd->buffers[vd->bon].binf = buf;      /// included to store byteused information
+            vd->buffers[vd->bon].binf = buf;
 
             if (vd->buffer_maxsize < buf.bytesused) {
                 puts("erro size buffer");
@@ -514,53 +398,35 @@ int cam_read_frame(viod *vd) {
             cam_process_image((*vd));
 
             if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
-
+                explain_v4l2_error("Devolução de buffer de memória para reuso pelo driver (VIDIOC_QBUF)");
                 switch (errno) {
                     case EAGAIN:
-                        errno_exit("error found");
                         return -2;
-
                     case EIO:
-                        // Could ignore EIO, see spec.
-
-                        // fall through
-
                     default:
                         errno_exit("VIDIOC_QBUF");
                 }
-
-                errno_exit("error found");
                 return -2;
-
             }
-
             return 0;
 
         case IO_METHOD_USERPTR:
-
             CLEAR(buf);
-
             buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             buf.memory = V4L2_MEMORY_USERPTR;
 
             if (-1 == xioctl(vd->fid, VIDIOC_DQBUF, &buf)) {
+                if (errno != EAGAIN) {
+                    explain_v4l2_error("Retirada de buffer User Pointer da fila (VIDIOC_DQBUF)");
+                }
                 switch (errno) {
                     case EAGAIN:
-                        errno_exit("error found");
                         return -2;
-
                     case EIO:
-                        /* Could ignore EIO, see spec. */
-
-                        /* fall through */
-
                     default:
                         errno_exit("VIDIOC_DQBUF");
                 }
-                printf("error found\n");
-
                 return -2;
-
             }
 
             for (i = 0; i < vd->num_buf; ++i)
@@ -568,9 +434,8 @@ int cam_read_frame(viod *vd) {
                     break;
 
             assert(i < vd->num_buf);
-
             vd->bon = i;
-            vd->buffers[i].binf = buf;              /// included to store byteused information
+            vd->buffers[i].binf = buf;
 
             if (vd->buffer_maxsize < buf.bytesused) {
                 puts("erro size buffer");
@@ -579,42 +444,23 @@ int cam_read_frame(viod *vd) {
             cam_process_image((*vd));
 
             if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
-
+                explain_v4l2_error("Devolução de buffer User Pointer para a fila do driver (VIDIOC_QBUF)");
                 switch (errno) {
                     case EAGAIN:
-                        errno_exit("error found");
                         return -2;
-
                     case EIO:
-                        // Could ignore EIO, see spec.
-
-                        // fall through
-
                     default:
                         errno_exit("VIDIOC_QBUF");
                 }
-
-                errno_exit("error found");
                 return -2;
-
             }
-
             return 0;
 
-
         case IO_METHOD_DMABUF:
-
             return -2;
-
-
     }
-
     return 1;
-
-
-
 }
-
 
 
 int cam_mainloop(viod *vd) {
@@ -668,7 +514,6 @@ int cam_mainloop(viod *vd) {
 
 
 int cam_stop_capturing(viod *vd) {
-
     enum v4l2_buf_type type;
 
     switch (vd->io) {
@@ -678,37 +523,26 @@ int cam_stop_capturing(viod *vd) {
 
         case IO_METHOD_MMAP:
         case IO_METHOD_USERPTR:
-
             type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             if (-1 == xioctl(vd->fid, VIDIOC_STREAMOFF, &type)) {
-
+                explain_v4l2_error("Desativação e encerramento do fluxo de dados (VIDIOC_STREAMOFF)");
                 switch (errno) {
                     case EBADF:
                         errno_exit("error found: EBADF");
                         return -2;
-
                     case ENODEV:
-
                         errno_exit("error found: ENODEV");
                         return -2;
-
                     default:
-                        errno_exit("VIDIOC_QBUF");
+                        errno_exit("error in stop stream VIDIOC_STREAMOFF\n");
                 }
-
-                errno_exit("error in stop stream VIDIOC_STREAMOFF\n");
-                return -2;
-
             }
-
             return 0;
 
         case IO_METHOD_DMABUF:
-
             return -2;
-
     }
-
+    return 0;
 }
 
 
@@ -717,7 +551,7 @@ int cam_uninit_device(viod *vd) {
     unsigned int i;
     struct v4l2_requestbuffers req;
 
-    switch (io) {
+    switch (vd->io) {
 
         case IO_METHOD_READ:
 
@@ -807,7 +641,7 @@ int cam_deallocate_xbuf(viod *vd) {
 }
 
 
-int capture_pictures_v4l2(viod *vd){
+int capture_pictures_v4l2(viod *vd){        /// Initializing, capturing from, and releasing a camera
 
   int r;
 
@@ -884,7 +718,9 @@ void* cam_thread_v4l2(void *vd){
 
   p->v_mat.push_back(im);
 
+
   capture_pictures_v4l2(p);
+
 
   erase_process_initialization((*p));
 
@@ -1316,7 +1152,7 @@ void stop_all_threads(vector<viod*> &vv) {
 
 }
 
-
+#if(0)
 void get_errno_description() {
 
     int x;
@@ -1464,5 +1300,5 @@ void get_errno_description() {
 
     //return 0;
 }
-
+#endif
 

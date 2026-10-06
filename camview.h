@@ -22,6 +22,7 @@
 #include <vector>
 using namespace std;
 
+#include <atomic>
 
 #include "v4l2misc.h"
 
@@ -91,43 +92,56 @@ typedef struct _dany{           // Destroy any object
     void(*pdest)(const void*);  // Function pointer for a function that is used to encapsulate the destruction function
 } dany;
 
-#define CREATE_DANY(obj,T)    {std::addressof(*obj), [](const void* x) { static_cast<const T*>(x)->~T(); } }
+#define CREATE_DANY(obj,T)    {std::addressof(*obj), [](const void* x) { delete static_cast<const T*>(x); } }
 
 typedef struct _video_io_device{
 
-    pthread_t           tid = 0;                            /// Thread identifier
-    v4l2_id             vid;                                /// v4l2 device type and number
-    int                 fid = 0;                            /// file identifier
-    enum io_method      io;                                 /// data transfer method
-    int                 st;                                 /// device status
-    vbuff               *buffers = 0;                       /// pointer for vector of buffers structs
-    int                 bon;                                /// number of actived buffer
-    unsigned int        num_buf;                            /// total buffers number
-    int                 w;                                  /// width of image
-    int                 h;                                  /// height of image
+    pthread_t           tid = 0;             /// ID da pthread de captura desta câmera (uma thread por câmera, criada em 'C'apture)
+    v4l2_id             vid;                  /// tipo e número do dispositivo (ex: /dev/videoN)
+    int                 fid = 0;              /// file descriptor do dispositivo aberto (retorno de open())
+    enum io_method      io;                   /// método de transferência de buffer (mmap, read, userptr)
+    std::atomic<int>    st;                   /// status atual: DEV_NONE/BUSY/OPEN/CONFIGURED/OUR/CAPTURING/PROCESSING/ALL
+                                               /// (ver v4l2misc.h). std::atomic: lido pela thread de captura e pela UI
+    vbuff               *buffers = 0;         /// vetor de buffers de captura mapeados (mmap) do driver v4l2
+    int                 bon;                  /// índice do buffer atualmente ativo/em uso dentro de 'buffers'
+    unsigned int        num_buf;              /// número total de buffers alocados pelo driver
+    int                 w;                    /// largura da imagem capturada (pixels)
+    int                 h;                    /// altura da imagem capturada (pixels)
 
-    void (*img_proc)(struct _video_io_device&) = 0;         /// pointer for process function
-    int                 procidx = 0;                        /// process index on process vector
+    void (*img_proc)(struct _video_io_device&) = 0;   /// ponteiro para a função de processamento ativa (um de vet_of_funcs em multiview.cpp);
+                                                        /// 0 = sem processamento, só captura crua
+    int                 procidx = 0;          /// índice do processo ativo em vet_of_funcs (0-5 = process000..process005; ver multiview.cpp)
 
-    unsigned int        buffer_maxsize;                     /// max buffer size
-    int                 view = 0;                           /// set for camera displayed
-    int                 thon = 0;                           /// set if thread actived (capturing or processing)
+    unsigned int        buffer_maxsize;       /// tamanho máximo em bytes de um buffer de captura
+    int                 view = 0;             /// 1 = esta é a câmera sendo exibida no momento (só uma por vez; ver view_on/stop_view)
+    int                 thon = 0;             /// 1 = thread de captura ativa (setar 0 sinaliza pra thread encerrar - ver tecla 'E'/Exit)
 
-    unsigned char*      xbuf = 0;                           /// extra buffer for convertions
+    unsigned char*      xbuf = 0;             /// buffer auxiliar usado nas conversões de formato de pixel (YUYV/Bayer/MJPEG -> RGB)
 
-    tmstat              tm;                                 /// time struct to register events
+    tmstat              tm;                   /// timestamps para medir tempo de captura/processamento/renderização (estatísticas de FPS)
 
-    vector<Mat>         c_mat;                              /// images for calculations only
-    vector<Mat>         v_mat;                              /// images for calculations and display
-    vector<dany>        d_vet;                              /// pointers to objects
+    vector<Mat>         c_mat;                /// imagens intermediárias só para cálculo (não exibidas); limpo a cada troca de processo
+    vector<Mat>         v_mat;                /// imagens exibíveis: v_mat[0] é sempre a imagem original (RGB/BGR);
+                                               /// v_mat[1+] são criadas por cada process00X conforme sua necessidade (ex: HSV, mapa de detecção).
+                                               /// 'nv' escolhe qual delas é mostrada na tela
+    vector<dany>        d_vet;                /// estado persistente por-câmera do processo ativo (histogramas, classificadores, retângulos
+                                               /// rastreados etc.) - ver CREATE_DANY. Limpo junto com c_mat/v_mat em erase_process_initialization()
+                                               /// sempre que o processo é trocado ou a captura reinicia
 
-    int                 nv = 0;                             /// number view - number of image to show from the processed images list
+    std::mutex          tm_mutex;              /// sincronisa o cálculo dos atrasos na thread de exibição com o registro dos tempos na thread de captura
 
-    int                 procinit = 0;                       /// control process initialization
+    std::atomic<bool>   roi_request{false};   /// captura pede: "preciso de uma ROI selecionada"
+    std::atomic<bool>   roi_ready{false};      /// main avisa: "pronto, resultado disponível em roi_result"
+    cv::Rect            roi_result;            /// retângulo escolhido pela main - só lido pela captura depois de ver roi_ready==true
 
-    __u32               pxfmt = 0;                          /// pixel format
-    ///char                pxdes[32];                          /// pixel description
-    char                dvnm[32];                           /// device name
+    int                 nv = 0;               /// índice de qual imagem de v_mat é exibida no momento (seta esquerda/direita troca)
+
+    int                 procinit = 0;         /// 0 = process00X ainda precisa rodar sua inicialização (1x); 1 = já inicializado, roda só o loop por-frame
+
+    __u32               pxfmt = 0;            /// formato de pixel reportado pelo driver v4l2 (FOURCC, ex: YUYV, MJPG)
+    ///char                pxdes[32];          /// descrição textual do pixel format (desativado)
+    char                dvnm[32];              /// nome do dispositivo (ex: "video0")
+
 
 } viod;
 
@@ -180,14 +194,22 @@ int capture_pictures_v4l2(viod *vd);
 int capture_pictures_opencv(viod &vd);
 void cam_process_image(viod &vd);
 int free_v4l2_video_buffers(viod &vd);
-int cam_uninit_device(viod *vd);
-int cam_stop_capturing(viod *vd);
+
+
 int stop_view(vector<viod*> &vv);
 int view_on(vector<viod*> &vv);
 void stop_all_threads(vector<viod*> &vv);
-int cam_deallocate_xbuf(viod &vd);
+
 void erase_process_initialization(viod &vd);
 
-void get_errno_description();
+
+int cam_def_buffer_maxsize(viod *vd);
+int cam_init_device(viod *vd);
+int cam_allocate_xbuf(viod *vd);
+int cam_start_capturing(viod *vd);
+int cam_mainloop(viod *vd);
+int cam_stop_capturing(viod *vd);
+int cam_uninit_device(viod *vd);
+int cam_deallocate_xbuf(viod &vd);
 
 #endif // CAMVIEW_H_INCLUDED
