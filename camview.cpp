@@ -1,6 +1,38 @@
+/*
+ *  V4L2 video capture: My tests
+ *
+ *  Nome: Josemar Simão
+ *  email: josemars@ifes.edu.br
+ *
+ *  This program can be used and distributed without restrictions.
+ *
+ *  This program is provided with the V4L2 API
+ *  see http://linuxtv.org/docs.php for more information
+ *
+ *  ---------------------------------------------------------------------------
+ *  camview.cpp - BIBLIOTECA MULTICÂMERA (uma thread de captura por câmera)
+ *
+ *  Etapa 3 da reorganização: o motor de captura que antes estava duplicado aqui
+ *  (cam_init_mmap/userp/read, cam_read_frame, cam_mainloop...) foi substituído
+ *  por chamadas ao núcleo v4l2core. Este arquivo ficou só com o que é próprio
+ *  do multicâmera:
+ *    - a lista de câmeras e a detecção de hot-plug (make_camera_list);
+ *    - o ciclo de vida de cada câmera/thread (estados DEV_*, view, thon);
+ *    - a ligação do núcleo com o processamento de imagem (cam_on_frame).
+ *
+ *  Política de erro: ao contrário da câmera única, NENHUMA função daqui chama
+ *  exit(). Se uma câmera falha, só a thread dela termina; as outras continuam.
+ *  ---------------------------------------------------------------------------
+ */
+
 #include "camview.h"
+#include "camconv.h"       /// convertToRgb()
 
+/* Valor guardado em viod.io quando o dispositivo está ocupado por outro processo.
+ * (Antes era escrito como ~IO_METHOD_READ, que é -1, mas ninguém percebia.) */
+#define CAM_IO_BUSY (-1)
 
+/* Nomes dos estados DEV_* indexados pelo próprio valor do estado (ex.: [16] = "CAPTURING"). */
 const char *cam_status[] = {
     "NONE",
     "BUSY",
@@ -69,564 +101,225 @@ const char *cam_status[] = {
     "ALL"
 };
 
-int cam_init_dma(viod *vd) {
+/* ========================================================================== */
+/*  Ligação entre o núcleo v4l2core e a câmera (viod)                         */
+/* ========================================================================== */
 
-  return -1;
+/*
+ * Mostra o diagnóstico detalhado do último erro registrado na sessão da câmera.
+ * Não encerra o programa (o multiview deve continuar com as outras câmeras).
+ */
+static void cam_report_error(const viod *vd) {
+
+    errno = vd->sess.err_no;        /* explain_v4l2_error() decide a explicação pelo errno */
+    explain_v4l2_error(vd->sess.err_ctx ? vd->sess.err_ctx : "captura de vídeo");
+}
+
+/*
+ * Copia o estado da sessão (fonte única) para os campos "espelho" de viod que
+ * multiview.cpp e os process00X.cpp leem diretamente (buffers, bon, w, h...).
+ * Deve ser chamada sempre que a sessão mudar (formato lido, buffers criados/liberados).
+ */
+static void cam_sync_from_session(viod *vd) {
+
+    vd->buffers        = vd->sess.buffers;
+    vd->num_buf        = vd->sess.num_buf;
+    vd->buffer_maxsize = vd->sess.buffer_maxsize;
+    vd->bon            = vd->sess.bon;
+    vd->w              = vd->sess.w;
+    vd->h              = vd->sess.h;
+    vd->pxfmt          = vd->sess.pxfmt;
+}
+
+/*
+ * Callback chamado pelo núcleo a cada frame pronto (na thread de captura).
+ * Atualiza o índice do buffer ativo e dispara o processamento da imagem.
+ * Substitui a chamada direta cam_process_image() que existia dentro de cam_read_frame().
+ */
+static void cam_on_frame(void *user, const void *data, size_t bytesused,
+                         const struct v4l2_buffer *binf) {
+
+    viod *vd = (viod *)user;
+
+    (void)data;         /* os dados são lidos de vd->buffers[vd->bon], como antes */
+    (void)bytesused;
+    (void)binf;
+
+    vd->bon = vd->sess.bon;     /* qual dos buffers acabou de ser preenchido */
+
+    cam_process_image(*vd);     /* versão do projeto, se existir; senão a padrão (fraca) logo abaixo */
+}
+
+/*
+ * Callback de parada do laço de captura: devolve 0 quando alguém pediu para
+ * encerrar esta câmera (thon = 0, tecla 'E' ou remoção da câmera).
+ */
+static int cam_keep_running(void *user) {
+
+    return ((viod *)user)->thon == 1;
+}
+
+/*
+ * Descobre o método de I/O livre da câmera, mantendo a convenção usada por
+ * viod.io: >= 0 método válido, CAM_IO_BUSY (-1) ocupada, -2 erro/sem captura.
+ */
+static int cam_probe_io(int fid) {
+
+    int r = v4l2c_probe_io(fid);
+
+    if (r >= 0) {
+        return r;                       /* MMAP / USERPTR / READ */
+    }
+
+    if (V4L2C_ERR_BUSY == r) {
+        return CAM_IO_BUSY;
+    }
+
+    return -2;
+}
+
+/* ========================================================================== */
+/*  Processamento de cada frame: cam_process_image()                          */
+/* ========================================================================== */
+
+/*
+ * cam_process_image - O QUE FAZER COM CADA FRAME RECEBIDO (versão PADRÃO, "FRACA")
+ *
+ * É chamada uma vez por frame, na thread de captura da câmera, logo depois que o núcleo
+ * (v4l2core) entrega o frame (veja cam_on_frame). É o PONTO DE EXTENSÃO da biblioteca:
+ * a biblioteca captura, mas quem decide o que fazer com a imagem é o seu projeto.
+ *
+ * COMO FUNCIONA A SUBSTITUIÇÃO (mesma ideia de process_image() em v4l2misc):
+ *   Esta definição está marcada __attribute__((weak)). Se o seu projeto definir, em qualquer
+ *   .cpp dele, uma função com EXATAMENTE esta assinatura (C++, sem static):
+ *
+ *           void cam_process_image(viod &vd) { ... }
+ *
+ *   o linker usa a SUA versão (forte) e ignora esta. Se não definir nenhuma, vale a padrão.
+ *   Só pode haver UMA versão forte por executável (duas dão erro "multiple definition").
+ *   Se a sua função estiver dentro de uma biblioteca estática (.a) que nada mais referencia,
+ *   o linker pode não incluí-la: liste o arquivo diretamente no projeto.
+ *
+ * O QUE ESTA VERSÃO PADRÃO FAZ (o mesmo que o multiview fazia):
+ *   1. Se a câmera está em exibição (vd.view) ou há um processo ativo (vd.img_proc), converte o
+ *      frame para RGB em vd.v_mat.at(0) usando convertToRgb();
+ *   2. Se há um processo ativo (vd.img_proc != 0), chama-o: é o ponteiro para uma das funções
+ *      de processamento do programa (ex.: vet_of_funcs em multiview.cpp);
+ *   3. Atualiza o contador de quadros por segundo (vd.tm.fr);
+ *   4. Guarda os instantes t1..t6 em vd.tm (protegidos por vd.tm_mutex) para o programa
+ *      mostrar quanto tempo levou cada etapa.
+ *
+ * COMO ESCREVER A SUA:
+ *   - O frame está em vd.buffers[vd.bon].start; o número de bytes úteis em
+ *     vd.buffers[vd.bon].binf.bytesused; formato e tamanho em vd.pxfmt, vd.w e vd.h.
+ *     Esses dados só valem DENTRO desta chamada (o buffer volta ao driver depois).
+ *   - Para ter a imagem colorida use convertToRgb(vd, vd.v_mat.at(0)) (camconv.h).
+ *   - Roda na thread de captura de CADA câmera, ao mesmo tempo que as outras: não bloqueie
+ *     por muito tempo, não chame exit() e proteja com mutex qualquer dado compartilhado com
+ *     a thread principal.
+ *   - Se quiser manter o cronômetro do multiview, preencha vd.tm como abaixo.
+ *
+ *   Exemplo mínimo (conta frames e ignora a imagem):
+ *           static int total = 0;
+ *           void cam_process_image(viod &vd) { total++; }
+ */
+__attribute__((weak)) void cam_process_image(viod &vd) {
+
+    struct timeval t1,t2,t3,t4,t5,t6;       /* instantes de cada etapa (para medir o tempo gasto) */
+
+    gettimeofday(&t1, NULL);                /* início do processamento deste frame */
+
+    /// ---- Etapa 1: converte o frame para RGB, só se alguém vai usá-lo ----
+    if(vd.view || vd.img_proc != 0){
+        convertToRgb(vd,vd.v_mat.at(0));    /* vd.v_mat.at(0) recebe a imagem RGB */
+    }
+
+    gettimeofday(&t2, NULL);
+
+    /// ---- Etapa 2: chama o processo de imagem ativo (se houver) ----
+    if(vd.img_proc != 0){
+        (*vd.img_proc)(vd);
+    }
+
+    gettimeofday(&t3, NULL);
+
+    /// ---- Etapa 3: frame rate. Conta quadros e, a cada segundo, grava o total em vd.tm.fr ----
+    vd.tm.cnt++;
+    if((vd.tm.t1.tv_sec*1000 + vd.tm.t1.tv_usec/1000) - (vd.tm.t0.tv_sec*1000 + vd.tm.t0.tv_usec/1000) > 1000){
+        vd.tm.fr = vd.tm.cnt - 1;
+        vd.tm.cnt = 0;
+        vd.tm.t0 = t1;
+    }
+
+    /* As etapas de "swap" e "ascii" são medidas pela thread principal; aqui só carimbam o tempo. */
+    gettimeofday(&t4, NULL);
+    gettimeofday(&t5, NULL);
+    gettimeofday(&t6, NULL);
+
+    /// ---- Etapa 4: publica os instantes para a thread principal (com exclusão mútua) ----
+    {
+        std::lock_guard<std::mutex> lk(vd.tm_mutex);
+        vd.tm.t1 = t1;
+        vd.tm.t2 = t2;
+        vd.tm.t3 = t3;
+        vd.tm.t4 = t4;
+        vd.tm.t5 = t5;
+        vd.tm.t6 = t6;
+    }
 
 }
 
-int cam_init_userp(viod *vd){
-    struct v4l2_requestbuffers req;
-    CLEAR(req);
+/* ========================================================================== */
+/*  Passos do ciclo de captura (cada um delega ao núcleo)                     */
+/* ========================================================================== */
 
-    req.count = 4;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req.memory = V4L2_MEMORY_USERPTR;
+/*
+ * Lê o formato atual da câmera e calcula o tamanho máximo de um frame.
+ * Retorna 0 em sucesso ou um código negativo do núcleo (ver s->err_*).
+ */
+int cam_def_buffer_maxsize(viod *vd){
 
-    if (-1 == xioctl(vd->fid, VIDIOC_REQBUFS, &req)) {
-        // Alinhado com a nova abordagem de diagnóstico explicativo
-        explain_v4l2_error("Alocação de buffers via User Pointer (VIDIOC_REQBUFS)");
+    int r = v4l2c_get_format(&vd->sess);
 
-        if (EINVAL == errno) {
-            fprintf(stderr, "Device does not support user pointer i/o\n");
-            exit(EXIT_FAILURE);
-        } else {
-            errno_exit("error in memory buffer allocation VIDIOC_REQBUFS");
-        }
+    if (r < 0) {
+        return r;
     }
 
-    if (req.count < 2) {
-        free_v4l2_video_buffers((*vd));
-        fprintf(stderr, "Insufficient buffer memory on device\n");
-        exit(EXIT_FAILURE);
-    }
-
-    vd->buffers = (vbuff *)calloc(4,sizeof(vbuff));
-    if (!vd->buffers){
-        free_v4l2_video_buffers((*vd));
-        fprintf(stderr, "Out of memory\n");
-        exit(EXIT_FAILURE);
-    }
-
-    for (vd->num_buf = 0; vd->num_buf < 4; ++vd->num_buf) {
-        vd->buffers[vd->num_buf].length = vd->buffer_maxsize;
-        vd->buffers[vd->num_buf].start = malloc(vd->buffer_maxsize);
-
-        if (!vd->buffers[vd->num_buf].start) {
-            fprintf(stderr, "Out of memory\n");
-            while(vd->num_buf){
-                vd->num_buf--;
-                free(vd->buffers[vd->num_buf].start);
-            }
-            free(vd->buffers);
-            free_v4l2_video_buffers((*vd));
-            exit(EXIT_FAILURE);
-        }
-    }
+    cam_sync_from_session(vd);          /* publica w, h, pxfmt e buffer_maxsize em viod */
     return 0;
 }
 
-int cam_init_mmap(viod *vd){
-    struct v4l2_requestbuffers req;
-    struct v4l2_buffer buf;
-    CLEAR(req);
-
-    req.count = 4;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req.memory = V4L2_MEMORY_MMAP;
-
-    if (-1 == xioctl(vd->fid, VIDIOC_REQBUFS, &req)) {
-        explain_v4l2_error("Alocação inicial de buffers MMAP no driver (VIDIOC_REQBUFS)");
-        if (EINVAL == errno) {
-            fprintf(stderr, "Device does not support memory mapping\n");
-            exit(EXIT_FAILURE);
-        } else {
-            errno_exit("error in memory buffer allocation VIDIOC_REQBUFS");
-        }
-    }
-
-    if (req.count < 2) {
-        free_v4l2_video_buffers((*vd));
-        fprintf(stderr, "Insufficient buffer memory on device\n");
-        exit(EXIT_FAILURE);
-    }
-
-    vd->buffers = (vbuff *)calloc(req.count,sizeof(vbuff));
-    if (!vd->buffers){
-        free_v4l2_video_buffers((*vd));
-        fprintf(stderr, "Out of memory\n");
-        exit(EXIT_FAILURE);
-    }
-
-    for(vd->num_buf = 0; vd->num_buf < req.count; ++vd->num_buf ){
-        CLEAR(buf);
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = vd->num_buf;
-
-        if (-1 == xioctl(vd->fid, VIDIOC_QUERYBUF, &buf)) {
-            explain_v4l2_error("Consulta de propriedades do buffer MMAP para mapeamento (VIDIOC_QUERYBUF)");
-            errno_exit("error reading memory buffer features VIDIOC_QUERYBUF");
-        }
-
-        vd->buffers[vd->num_buf].length = buf.length;
-        vd->buffers[vd->num_buf].start = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, vd->fid, buf.m.offset);
-
-        if (vd->buffers[vd->num_buf].start == MAP_FAILED){
-            explain_v4l2_error("Mapeamento físico de memória via chamada mmap()");
-            fprintf(stderr, "Memory mapping error\n");
-
-            while (vd->num_buf) {
-                if (-1 == munmap(vd->buffers[vd->num_buf].start,vd->buffers[vd->num_buf].length)) {
-                    errno_exit("error when unmapping memory");
-                }
-                vd->num_buf--;
-            }
-            free(vd->buffers);
-            free_v4l2_video_buffers((*vd));
-            exit(EXIT_FAILURE);
-        }
-
-        if (vd->buffer_maxsize < buf.length) {
-            vd->buffer_maxsize = buf.length;
-        }
-    }
-    return 0;
-}
-
-int cam_init_read(viod *vd){
-
-    vd->buffers = (vbuff *)calloc(1,sizeof(vbuff));
-
-    if (!vd->buffers){
-        fprintf(stderr, "Out of memory\n");
-        exit(EXIT_FAILURE);
-    }
-
-    vd->buffers->length = vd->buffer_maxsize;
-
-    vd->buffers->start = malloc(vd->buffer_maxsize);
-
-    if (!vd->buffers->start) {
-        fprintf(stderr, "Out of memory\n");
-        exit(EXIT_FAILURE);
-    }
-
-  return 0;
-}
-
-
+/*
+ * Aloca os buffers de captura conforme vd->io (READ, MMAP ou USERPTR).
+ * Retorna 0 em sucesso ou código negativo. Em falha o núcleo já desfez o que alocou.
+ */
 int cam_init_device(viod *vd){
 
-  switch (vd->io) {
+    int r = v4l2c_init_buffers(&vd->sess);
 
-        case IO_METHOD_READ:
-            return cam_init_read(vd);
+    cam_sync_from_session(vd);          /* publica buffers/num_buf (ou NULL se falhou) */
 
-        case IO_METHOD_MMAP:
-            return cam_init_mmap(vd);
-
-        case IO_METHOD_USERPTR:
-            return cam_init_userp(vd);
-
-        case IO_METHOD_DMABUF:
-            return cam_init_dma(vd);
-
-  }
-
-  return -1;
-
+    return (r < 0) ? r : 0;
 }
 
-
-int cam_def_buffer_maxsize(viod *vd){
-    struct v4l2_format fmt;
-    CLEAR(fmt);
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
-    if(-1 == xioctl(vd->fid, VIDIOC_G_FMT, &fmt)){
-        explain_v4l2_error("Leitura do formato atual da câmera para dimensionamento do buffer (VIDIOC_G_FMT)");
-        puts("error reading format features");
-        errno_exit("VIDIOC_G_FMT");
-    }
-
-    vd->buffer_maxsize = fmt.fmt.pix.sizeimage;
-    return 0;
-}
-
-
-
-
+/*
+ * Aloca o buffer auxiliar xbuf usado nas conversões de pixel (Bayer, Sonix, MJPEG...).
+ * Deve ser chamada depois de cam_init_device(), pois depende de buffer_maxsize.
+ */
 int cam_allocate_xbuf(viod *vd) {
 
   vd->xbuf = (unsigned char *)malloc(vd->buffer_maxsize);
 
   if (!vd->xbuf) {
-    return -1;
+    vd->sess.err_no  = ENOMEM;          /* registra o motivo no mesmo lugar dos outros erros */
+    vd->sess.err_ctx = "malloc (buffer auxiliar xbuf)";
+    return V4L2C_ERR_NOMEM;
   }
 
   return 0;
 }
 
-int cam_start_capturing(viod *vd) {
-    unsigned int i;
-    int er = 0;
-    enum v4l2_buf_type type;
-    struct v4l2_buffer buf;
-
-    switch (vd->io) {
-        case IO_METHOD_READ:
-            /* Nothing to do. */
-            break;
-
-        case IO_METHOD_MMAP:
-            for (i = 0; i < vd->num_buf; ++i) {
-                CLEAR(buf);
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory = V4L2_MEMORY_MMAP;
-                buf.index = i;
-
-                if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
-                    // Substituição direta da chamada antiga pela nova abordagem rica
-                    explain_v4l2_error("Enfileiramento inicial de buffers MMAP (VIDIOC_QBUF)");
-                    puts("error in VIDIOC_QBUF");
-                    er = 1;
-                }
-            }
-
-            type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (-1 == xioctl(vd->fid, VIDIOC_STREAMON, &type)) {
-                explain_v4l2_error("Ativação da transmissão de streaming de vídeo (VIDIOC_STREAMON)");
-
-                if (ENOSPC == errno) {
-                    fprintf(stderr, "Erro específico: Sem largura de banda USB suficiente no barramento.\n");
-                }
-                errno_exit("error starting stream VIDIOC_STREAMON");
-                er = 1;
-            }
-
-            if (er) {
-                cam_stop_capturing(vd);
-                cam_uninit_device(vd);
-                return -1;
-            }
-            break;
-
-        case IO_METHOD_USERPTR:
-            for (i = 0; i < vd->num_buf; ++i) {
-                CLEAR(buf);
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory = V4L2_MEMORY_USERPTR;
-                buf.index = i;
-                buf.m.userptr = (unsigned long)vd->buffers[i].start;
-                buf.length = vd->buffers[i].length;
-
-                if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
-                    explain_v4l2_error("Enfileiramento inicial de buffers User Pointer (VIDIOC_QBUF)");
-                    errno_exit("error in VIDIOC_QBUF");
-                    er = 1;
-                }
-            }
-
-            type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (-1 == xioctl(vd->fid, VIDIOC_STREAMON, &type)) {
-                explain_v4l2_error("Ativação da transmissão via User Pointer (VIDIOC_STREAMON)");
-                errno_exit("error starting stream VIDIOC_STREAMON");
-                er = 1;
-            }
-
-            if (er) {
-                cam_stop_capturing(vd);
-                cam_uninit_device(vd);
-                return -1;
-            }
-            break;
-
-        case IO_METHOD_DMABUF:
-            return -1;
-    }
-    return er;
-}
-
-int cam_read_frame(viod *vd) {
-    struct v4l2_buffer buf;
-    unsigned int i;
-
-    switch (vd->io) {
-        case IO_METHOD_READ:
-            if (-1 == read(vd->fid,vd->buffers->start,vd->buffers->length)) {
-                switch (errno) {
-                    case EAGAIN:
-                        return -2;
-                    case EIO:
-                    default:
-                        explain_v4l2_error("Tentativa de leitura direta via chamada read()");
-                        errno_exit("read");
-                }
-                return -2;
-            }
-            vd->bon = 0;
-            cam_process_image((*vd));
-            return 0;
-
-        case IO_METHOD_MMAP:
-            CLEAR(buf);
-            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            buf.memory = V4L2_MEMORY_MMAP;
-
-            if (-1 == xioctl(vd->fid, VIDIOC_DQBUF, &buf)) {
-                if (errno != EAGAIN) { // Ignora mensagens repetitivas se for apenas o driver dizendo "ainda não capturei"
-                    explain_v4l2_error("Retirada de buffer processado da fila do driver (VIDIOC_DQBUF)");
-                }
-                switch (errno) {
-                    case EAGAIN:
-                        return -2;
-                    case EIO:
-                    default:
-                        errno_exit("VIDIOC_DQBUF");
-                }
-            }
-
-            assert(buf.index < vd->num_buf);
-            vd->bon = buf.index;
-            vd->buffers[vd->bon].binf = buf;
-
-            if (vd->buffer_maxsize < buf.bytesused) {
-                puts("erro size buffer");
-            }
-
-            cam_process_image((*vd));
-
-            if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
-                explain_v4l2_error("Devolução de buffer de memória para reuso pelo driver (VIDIOC_QBUF)");
-                switch (errno) {
-                    case EAGAIN:
-                        return -2;
-                    case EIO:
-                    default:
-                        errno_exit("VIDIOC_QBUF");
-                }
-                return -2;
-            }
-            return 0;
-
-        case IO_METHOD_USERPTR:
-            CLEAR(buf);
-            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            buf.memory = V4L2_MEMORY_USERPTR;
-
-            if (-1 == xioctl(vd->fid, VIDIOC_DQBUF, &buf)) {
-                if (errno != EAGAIN) {
-                    explain_v4l2_error("Retirada de buffer User Pointer da fila (VIDIOC_DQBUF)");
-                }
-                switch (errno) {
-                    case EAGAIN:
-                        return -2;
-                    case EIO:
-                    default:
-                        errno_exit("VIDIOC_DQBUF");
-                }
-                return -2;
-            }
-
-            for (i = 0; i < vd->num_buf; ++i)
-                if (buf.m.userptr == (unsigned long)vd->buffers[i].start && buf.length == vd->buffers[i].length)
-                    break;
-
-            assert(i < vd->num_buf);
-            vd->bon = i;
-            vd->buffers[i].binf = buf;
-
-            if (vd->buffer_maxsize < buf.bytesused) {
-                puts("erro size buffer");
-            }
-
-            cam_process_image((*vd));
-
-            if (-1 == xioctl(vd->fid, VIDIOC_QBUF, &buf)) {
-                explain_v4l2_error("Devolução de buffer User Pointer para a fila do driver (VIDIOC_QBUF)");
-                switch (errno) {
-                    case EAGAIN:
-                        return -2;
-                    case EIO:
-                    default:
-                        errno_exit("VIDIOC_QBUF");
-                }
-                return -2;
-            }
-            return 0;
-
-        case IO_METHOD_DMABUF:
-            return -2;
-    }
-    return 1;
-}
-
-
-int cam_mainloop(viod *vd) {
-
-
-    int r;
-    struct timeval tv;
-    fd_set fds;
-
-    for( ; ; ){
-        if (vd->thon != 1) {
-            return 0;
-        }
-
-        FD_ZERO(&fds);
-        FD_SET(vd->fid, &fds);
-
-        tv.tv_sec = 5;
-        tv.tv_usec = 0;
-
-        r = select(vd->fid + 1, &fds, NULL, NULL, &tv);
-
-        if(-1 == r){
-
-            if(EINTR == errno) continue;
-            errno_exit("select");
-            return -2;
-
-        }
-
-
-        if(0 == r){
-
-            fprintf(stderr, "select timeout\n");
-            exit(EXIT_FAILURE);
-
-        }
-
-        if (cam_read_frame(vd)){
-
-            break;
-
-        }else{
-
-
-        }
-
-    }
-
-}
-
-
-int cam_stop_capturing(viod *vd) {
-    enum v4l2_buf_type type;
-
-    switch (vd->io) {
-        case IO_METHOD_READ:
-            /* Nothing to do. */
-            return 0;
-
-        case IO_METHOD_MMAP:
-        case IO_METHOD_USERPTR:
-            type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (-1 == xioctl(vd->fid, VIDIOC_STREAMOFF, &type)) {
-                explain_v4l2_error("Desativação e encerramento do fluxo de dados (VIDIOC_STREAMOFF)");
-                switch (errno) {
-                    case EBADF:
-                        errno_exit("error found: EBADF");
-                        return -2;
-                    case ENODEV:
-                        errno_exit("error found: ENODEV");
-                        return -2;
-                    default:
-                        errno_exit("error in stop stream VIDIOC_STREAMOFF\n");
-                }
-            }
-            return 0;
-
-        case IO_METHOD_DMABUF:
-            return -2;
-    }
-    return 0;
-}
-
-
-int cam_uninit_device(viod *vd) {
-
-    unsigned int i;
-    struct v4l2_requestbuffers req;
-
-    switch (vd->io) {
-
-        case IO_METHOD_READ:
-
-            free(vd->buffers[0].start);
-
-            if(vd->buffers) {
-
-                free(vd->buffers);
-                vd->buffers = 0;
-
-            }
-
-            return 0;
-
-        case IO_METHOD_MMAP:
-
-            for (i = 0; i < vd->num_buf; ++i){
-
-                if (-1 == munmap(vd->buffers[i].start, vd->buffers[i].length)) {
-
-                    errno_exit("error when unmapping memory");
-                    return -2;
-
-                }
-
-            }
-
-            /// ***********************************************
-            /// ************ DEALLOCATE DRIVER BUFFER *********
-            /// ***********************************************
-
-            if (-1 == free_v4l2_video_buffers((*vd))) {
-
-                return -2;
-
-            }
-
-            if (vd->buffers) {
-
-                free(vd->buffers);
-                vd->buffers = 0;
-
-            }
-
-            return 0;
-
-        case IO_METHOD_USERPTR:
-
-            for (i = 0; i < vd->num_buf; ++i){
-
-                free(vd->buffers[i].start);
-                vd->buffers[i].start = 0;
-                vd->buffers[i].length = 0;
-                memset(&vd->buffers[i].binf,0,sizeof(v4l2_buffer));
-
-            }
-
-            if(vd->buffers) {
-
-                free(vd->buffers);
-                vd->buffers = 0;
-
-            }
-
-            return 0;
-
-        case IO_METHOD_DMABUF:
-
-            return -2;
-
-    }
-
-}
-
-
+/* Libera o buffer auxiliar xbuf (seguro chamar mesmo se ele não existir). */
 int cam_deallocate_xbuf(viod *vd) {
 
   if (vd->xbuf) {
@@ -640,53 +333,151 @@ int cam_deallocate_xbuf(viod *vd) {
 
 }
 
+/* Enfileira os buffers no driver e liga o streaming desta câmera. */
+int cam_start_capturing(viod *vd) {
 
-int capture_pictures_v4l2(viod *vd){        /// Initializing, capturing from, and releasing a camera
+    int r = v4l2c_start(&vd->sess);
+
+    return (r < 0) ? r : 0;
+}
+
+/*
+ * Laço de captura: entrega frames a cam_on_frame() até thon != 1 ou até um erro.
+ * Retorna 0 se parou por pedido (thon = 0); código negativo se falhou
+ * (incluindo V4L2C_ERR_TIMEOUT quando a câmera para de enviar frames).
+ *
+ * Corrige o cam_mainloop() original: lá o retorno de cam_read_frame() era
+ * interpretado ao contrário e a função terminava sem 'return'.
+ */
+int cam_mainloop(viod *vd) {
+
+    int r = v4l2c_run(&vd->sess, cam_keep_running);
+
+    return (r < 0) ? r : 0;
+}
+
+/* Desliga o streaming desta câmera (seguro chamar sem ter iniciado). */
+int cam_stop_capturing(viod *vd) {
+
+    int r = v4l2c_stop(&vd->sess);
+
+    return (r < 0) ? r : 0;
+}
+
+/*
+ * Desfaz o mapeamento/alocação dos buffers e os devolve ao driver.
+ * Idempotente: pode ser chamada mais de uma vez.
+ */
+int cam_uninit_device(viod *vd) {
+
+    int r = v4l2c_free_buffers(&vd->sess);
+
+    cam_sync_from_session(vd);          /* buffers = NULL, num_buf = 0 (evita double free em make_camera_list) */
+
+    return (r < 0) ? r : 0;
+}
+
+/*
+ * Executa o ciclo completo de uma câmera: formato -> buffers -> xbuf -> streaming ->
+ * laço -> parar -> liberar. Roda dentro da thread de captura.
+ *
+ * Diferença em relação à versão anterior: a limpeza (parar, liberar buffers, liberar
+ * xbuf) acontece SEMPRE para o que foi alocado, mesmo se uma etapa intermediária
+ * falhar, e o primeiro erro fica registrado em vd->sess.err_no/err_ctx.
+ */
+int capture_pictures_v4l2(viod *vd){
 
   int r;
+  int have_buffers = 0;         /* 1 depois que cam_init_device() teve sucesso     */
+  int have_xbuf = 0;            /* 1 depois que cam_allocate_xbuf() teve sucesso   */
+  int saved_no;
+  const char *saved_ctx;
+
+  /* Prepara a sessão desta câmera: descritor, método de I/O e quem recebe os frames. */
+  v4l2c_session_init(&vd->sess, vd->fid);
+  vd->sess.io       = vd->io;
+  vd->sess.on_frame = cam_on_frame;
+  vd->sess.user     = vd;
 
   r = cam_def_buffer_maxsize(vd);
+
   if (r == 0) {
     r = cam_init_device(vd);
+    if (r == 0) {
+      have_buffers = 1;
+    }
   }
+
   if (r == 0) {
     r = cam_allocate_xbuf(vd);
+    if (r == 0) {
+      have_xbuf = 1;
+    }
   }
+
   if (r == 0) {
     r = cam_start_capturing(vd);
   }
+
   if (r == 0) {
-    r = cam_mainloop(vd);
+    r = cam_mainloop(vd);       /* só volta quando thon = 0 ou em erro */
   }
-  if ((r == 0) || (r == -2)) {
-    r = cam_stop_capturing(vd);
+
+  /* Guarda o primeiro erro: as funções de limpeza abaixo podem sobrescrevê-lo. */
+  saved_no  = vd->sess.err_no;
+  saved_ctx = vd->sess.err_ctx;
+
+  if (have_buffers) {
+    cam_stop_capturing(vd);
+    cam_uninit_device(vd);
   }
-  if ((r == 0) || (r == -2)) {
-    r = cam_uninit_device(vd);
+
+  if (have_xbuf) {
+    cam_deallocate_xbuf(vd);
   }
-  if ((r == 0) || (r == -2)) {
-    r = cam_deallocate_xbuf(vd);
+
+  if (r < 0) {
+    vd->sess.err_no  = saved_no;
+    vd->sess.err_ctx = saved_ctx;
   }
 
   return r;
 }
 
+/*
+ * Libera no DRIVER os buffers da câmera (REQBUFS com count = 0), usando o tipo de
+ * memória correto para o método de I/O. Usada depois de reconfigurar o formato.
+ * (A versão anterior passava o enum io_method como tipo de memória, valores diferentes.)
+ */
+int free_v4l2_video_buffers(viod &vd){
 
+  v4l2_session t;               /* sessão temporária: só carrega fid e io */
+
+  v4l2c_session_init(&t, vd.fid);
+  t.io = vd.io;
+
+  return (v4l2c_release_driver(&t) < 0) ? -1 : 0;
+}
+
+/* ========================================================================== */
+/*  Thread de captura                                                         */
+/* ========================================================================== */
+
+/*
+ * Limpa o que o processo de imagem ativo criou: mantém só a imagem original
+ * (v_mat[0]), apaga as demais, esvazia c_mat e destrói o estado persistente (d_vet).
+ */
 void erase_process_initialization(viod &vd) {
 
-    vector<Mat>::iterator it;
-    vector<Mat>::iterator itf;
+    /// Apaga do 2º ao último objeto de v_mat (o 1º é a imagem original)
+    if (vd.v_mat.size() > 1) {          /* proteção: antes, v_mat vazio causava comportamento indefinido */
+        vd.v_mat.erase(vd.v_mat.begin() + 1, vd.v_mat.end());
+    }
 
-    /// It erases from 2nd to last object of v_mat
-    it = vd.v_mat.begin();
-    it++;
-    itf = vd.v_mat.end();
-    vd.v_mat.erase(it, itf);
-
-    /// It erases all objetcts of c_mat
+    /// Apaga todos os objetos de c_mat
     vd.c_mat.clear();
 
-    /// It erases all objects of d_vet
+    /// Destrói todos os objetos de d_vet usando o destrutor guardado em cada um
     while( vd.d_vet.size() ){
 
         vd.d_vet.at(0).pdest(vd.d_vet.at(0).pobj);
@@ -696,17 +487,21 @@ void erase_process_initialization(viod &vd) {
 
 }
 
-
-
+/*
+ * Função da pthread de captura de UMA câmera (criada pela tecla 'C' em multiview.cpp).
+ * Marca a câmera como CAPTURING, zera os cronômetros, roda o ciclo de captura e, ao
+ * terminar (pedido de parada ou erro), devolve a câmera ao estado DEV_OPEN.
+ */
 void* cam_thread_v4l2(void *vd){
 
   viod *p = (viod*) vd;
-  Mat im(p->h,p->w,CV_8UC3);
+  int r;
+  Mat im(p->h,p->w,CV_8UC3);            /* v_mat[0]: imagem original no tamanho atual */
 
-  p->thon = 1;
+  p->thon = 1;                          /* sinaliza que a thread está ativa */
   p->st = DEV_CAPTURING;
 
-  gettimeofday(&(p->tm.t0),NULL);
+  gettimeofday(&(p->tm.t0),NULL);       /* todos os cronômetros começam no mesmo instante */
 
   p->tm.t1 = p->tm.t0;
   p->tm.t2 = p->tm.t0;
@@ -716,14 +511,36 @@ void* cam_thread_v4l2(void *vd){
   p->tm.t6 = p->tm.t0;
   p->tm.tx = p->tm.t0;
 
-  p->v_mat.push_back(im);
+  ///p->v_mat.push_back(im);
 
 
-  capture_pictures_v4l2(p);
+    /// Correção: v_mat[0] recebe o frame RGB convertido (convertToRgb) e sobrevive
+  /// entre capturas, pois erase_process_initialization apaga só do 2º elemento em
+  /// diante. Antes, "im" era sempre acrescentado com push_back e v_mat[0] ficava
+  /// com o tamanho da captura anterior: ao trocar a resolução, convertToRgb
+  /// escrevia uma imagem de tamanho novo num buffer de tamanho antigo.
+  /// Agora "im" (já alocado com p->w x p->h atuais) substitui v_mat[0]. A
+  /// atribuição de cv::Mat não copia pixels: v_mat[0] passa a compartilhar o
+  /// buffer de "im" (contagem de referências) e o buffer antigo é liberado
+  /// quando ninguém mais o referencia.
+  if (p->v_mat.empty())
+      p->v_mat.push_back(im);
+  else
+      p->v_mat.at(0) = im;
 
+
+
+
+  r = capture_pictures_v4l2(p);         /* bloqueia aqui até thon = 0 ou erro */
+
+  if (r < 0) {
+    cam_report_error(p);                /* só esta câmera para; o programa continua */
+  }
 
   erase_process_initialization((*p));
 
+  /* Volta ao estado "aberta": pode ser iniciada de novo ou removida pelo hot-plug. */
+  p->thon = 0;
   p->st = DEV_OPEN;
   CLEAR(p->tm);
   p->procinit = 0;
@@ -734,62 +551,56 @@ void* cam_thread_v4l2(void *vd){
   return 0;
 }
 
-
-
-
-int free_v4l2_video_buffers(viod &vd){
-
-  int r;
-  struct v4l2_requestbuffers req;
-
-  CLEAR(req);
-
-  req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  req.memory = vd.io;
-  req.count = 0;
-
-  r = xioctl(vd.fid, VIDIOC_REQBUFS, &req);
-
-  if (r == -1) {
-
-    puts("error in check_io_method_busy function");
-
-  }
-
-  return r;
-}
-
-
+/*
+ * Configura formato/resolução/intervalo da câmera interativamente (menus no terminal)
+ * e deixa a câmera no estado DEV_CONFIGURED.
+ * Retorna 0 em sucesso, -1 se o driver recusar (a câmera continua como estava).
+ */
 int setting_camera_features(viod &vd){
 
     struct v4l2_frmivalenum fl;
+    v4l2_session t;             /* sessão temporária só para aplicar o formato */
 
     if (vd.fid < 0) {
 
-        exit(1);
+        return -1;              /* antes: exit(1), que derrubava todas as câmeras */
 
     }
+
+    CLEAR(fl);                  /* antes não era zerada: 'fl.discrete' podia ter lixo */
 
     choose_or_enumerate_image_formats(vd.fid,&fl,0);
     choose_or_enumerate_frame_size(vd.fid,&fl,0);
     choose_or_enumerate_frame_intervals(vd.fid,&fl,0);
-    set_image_format(vd.fid,fl.pixel_format);
-    set_image_size(vd.fid,fl.width,fl.height);
-    set_image_intervals(vd.fid,fl.discrete.numerator, fl.discrete.denominator);
-    vd.w = fl.width;
-    vd.h = fl.height;
-    vd.pxfmt = fl.pixel_format;
-    free_v4l2_video_buffers(vd);
+
+    v4l2c_session_init(&t, vd.fid);
+
+    if (v4l2c_set_format(&t, fl.pixel_format, fl.width, fl.height) < 0 ||
+        v4l2c_set_interval(&t, fl.discrete.numerator, fl.discrete.denominator) < 0) {
+
+        errno = t.err_no;                   /* mostra o motivo e segue vivo */
+        explain_v4l2_error(t.err_ctx);
+        return -1;
+
+    }
+
+    /* Guarda o formato que o DRIVER aceitou (pode diferir do pedido). */
+    vd.w = t.w;
+    vd.h = t.h;
+    vd.pxfmt = t.pxfmt;
+
+    free_v4l2_video_buffers(vd);            /* libera buffers antigos do driver, se houver */
     vd.st = DEV_CONFIGURED;
 
     return 0;
 }
 
+/* ========================================================================== */
+/*  Seleção e exibição                                                        */
+/* ========================================================================== */
 
-
+/* Retorna o índice da câmera que está em exibição (view != 0) ou -1 se nenhuma. */
 int view_on(vector<viod*> &vv){
-
-    /* Return the index of camera that has view on. */
 
     int d;
     vector<viod*>::iterator it;
@@ -812,12 +623,8 @@ int view_on(vector<viod*> &vv){
     return d;
 }
 
-
-
-
+/* Desliga a exibição de todas as câmeras e retorna o índice da que estava ligada (ou -1). */
 int stop_view(vector<viod*> &vv){
-
-    /* Turn off the view feature of all cameras and return the index its. */
 
     int d;
     vector<viod*>::iterator it;
@@ -841,24 +648,16 @@ int stop_view(vector<viod*> &vv){
     return d;
 }
 
-
+/* Retorna 1 se alguma câmera está sendo exibida (view == 1), senão 0. */
 int is_displaying(vector<viod*> &vv){
 
-    if(vv.size()){
+    vector<viod*>::iterator it;
 
-        vector<viod*>::iterator it;
+    for (it = vv.begin(); it != vv.end(); it++) {
 
-        it = vv.begin();
+        if ( (*it)->view == 1) {
 
-        while( it != vv.end() ) {
-
-            if ( (*it)->view == 1) {
-
-                return 1;
-
-            }
-
-            it++;
+            return 1;
 
         }
 
@@ -868,28 +667,41 @@ int is_displaying(vector<viod*> &vv){
 
 }
 
+/* ========================================================================== */
+/*  Lista de câmeras e hot-plug                                               */
+/* ========================================================================== */
 
+/*
+ * Relê o formato atual (largura, altura, pixel format) direto do driver e o grava em viod.
+ * Retorna 0 em sucesso, -1 se o driver não responder.
+ */
 int update_cam_format(viod *p_vio){
 
-    struct v4l2_format fm;
+    v4l2_session t;             /* sessão temporária: não mexe na sessão de captura */
 
-    CLEAR(fm);
+    v4l2c_session_init(&t, p_vio->fid);
 
-    fm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
-    if (-1 == xioctl(p_vio->fid, VIDIOC_G_FMT, &fm)) {
+    if (v4l2c_get_format(&t) < 0) {
 
         return -1;
 
     }
 
-    p_vio->h = fm.fmt.pix.height;
-    p_vio->w = fm.fmt.pix.width;
-    p_vio->pxfmt = fm.fmt.pix.pixelformat;
+    p_vio->h = t.h;
+    p_vio->w = t.w;
+    p_vio->pxfmt = t.pxfmt;
 
     return 0;
 }
 
+/*
+ * Abre a câmera de índice 'i' (da lista de dispositivos de vídeo encontrados),
+ * descobre se está livre e a acrescenta ao vetor vv.
+ *
+ * Roda a cada varredura de hot-plug, então NÃO pode encerrar o programa: se a câmera
+ * sumiu entre a listagem e a abertura, ou não há permissão, ela é simplesmente ignorada.
+ * Retorna 0 se a câmera foi adicionada, -1 se foi ignorada.
+ */
 int add_camera(vector<viod*>& vv, int i){
 
     viod *p_vio;
@@ -897,24 +709,34 @@ int add_camera(vector<viod*>& vv, int i){
     struct v4l2_capability vcap;
     char npath [256];
 
-
-    p_vio = (viod *)new(viod);
-
     p_vid = (v4l2_id *)get_v4l2_id(i);
+
+    if (!p_vid) {
+
+        return -1;              /* a lista mudou: índice não existe mais */
+
+    }
+
+    p_vio = new viod;
+
     (p_vio->vid).typ = p_vid->typ;
     (p_vio->vid).num = p_vid->num;
 
     make_v4l2_path(npath,(p_vio->vid).typ,(p_vio->vid).num);
 
+    p_vio->fid = v4l2c_open(npath);     /* antes: open_v4l2_device(), que dava exit() em qualquer falha */
 
-    p_vio->fid = open_v4l2_device(npath);
+    if (p_vio->fid < 0) {
 
+        delete p_vio;
+        return -1;
 
-    p_vio->io = check_io_method_busy(p_vio->fid);
+    }
 
+    p_vio->io = cam_probe_io(p_vio->fid);
 
-    if (p_vio->io == ~IO_METHOD_READ) {
-        p_vio->st = DEV_BUSY;
+    if (p_vio->io == CAM_IO_BUSY) {
+        p_vio->st = DEV_BUSY;           /* outro programa está usando esta câmera */
     }
     else {
         p_vio->st = DEV_OPEN;
@@ -922,137 +744,102 @@ int add_camera(vector<viod*>& vv, int i){
 
     CLEAR(vcap);
 
-    if(-1 == xioctl(p_vio->fid,VIDIOC_QUERYCAP,&vcap)){
-        errno_exit("VIDIOC_QUERYCAP");
+    if(-1 == v4l2c_xioctl(p_vio->fid,VIDIOC_QUERYCAP,&vcap)){
+
+        v4l2c_close(p_vio->fid);        /* antes: errno_exit(), que derrubava o programa */
+        delete p_vio;
+        return -1;
+
     }
 
-    strcpy(p_vio->dvnm,(char *)vcap.card);
+    /* 'card' tem 32 bytes e pode vir sem '\0' final; dvnm também tem 32. */
+    strncpy(p_vio->dvnm,(char *)vcap.card,sizeof(p_vio->dvnm) - 1);
+    p_vio->dvnm[sizeof(p_vio->dvnm) - 1] = '\0';
 
     if (-1 == update_cam_format(p_vio)) {
 
-        close(p_vio->fid);
-
-        if (p_vio) {
-
-          delete(p_vio);
-
-        }
-
-    }else {
-
-        vv.push_back(p_vio);
+        v4l2c_close(p_vio->fid);        /* não é câmera de captura: descarta */
+        delete p_vio;
+        return -1;
 
     }
+
+    vv.push_back(p_vio);
 
     return 0;
 }
 
-
+/*
+ * Sincroniza o vetor de câmeras com o que existe em /dev agora (hot-plug):
+ *   - câmera que sumiu: pede parada da thread, espera, libera tudo e remove da lista;
+ *   - câmera que continua: reavalia se está livre ou ocupada por outro programa;
+ *   - câmera nova: abre e acrescenta.
+ */
 int make_camera_list(vector<viod*>& vv) {
 
     int dev_num;
     int i;
-    int cnt;
-    char ck [MAX_V4L2_DEV_NUM];
+    int cur;
+    char ck [MAX_V4L2_DEV_NUM];     /* ck[i] = 1 se o dispositivo i da varredura já está em vv */
     viod* vp;
 
     vector<viod*>::iterator it;
-    vector<viod*>::iterator itf;
 
     memset(ck,0,MAX_V4L2_DEV_NUM);
 
-    dev_num = make_video_list();
+    dev_num = make_video_list();    /* varre /dev e guarda a lista no v4l2misc */
 
     if (!vv.empty()) {
 
         it = vv.begin();
-        itf = vv.end();
 
-        while(it != itf){
+        while(it != vv.end()){
 
             if (!found_in_list((*it)->vid,ck)) {
 
+                /* ---- a câmera desapareceu: encerra e libera ---- */
                 vp = (viod *)*it;
                 vp->view = 0;
-                vp->thon = 0;
+                vp->thon = 0;                       /* pede à thread de captura para terminar */
 
-                while (it, 4 < (*it)->st) {
+                while (vp->st > DEV_CONFIGURED) {   /* espera sair de OUR/CAPTURING/PROCESSING */
                     sleep(1);
                 }
 
-                if (vp->xbuf) {
-                    cam_deallocate_xbuf(vp);
-                }
+                cam_deallocate_xbuf(vp);
+                cam_uninit_device(vp);              /* idempotente; antes havia free() manual com risco de double free */
+                v4l2c_close(vp->fid);
 
-                if (vp->buffers) {
-                    free(vp->buffers);
-                    vp->buffers = 0;
-                }
+                delete vp;
 
-                close_v4l2_device(vp->fid);
-
-                if (*it) {
-
-                    delete(*it);
-
-                }
-
-                vv.erase(it);
+                it = vv.erase(it);                  /* erase() devolve o próximo iterador válido (antes ficava inválido) */
             }
             else {
 
-                if ((*it)->st < DEV_CAPTURING|DEV_CONFIGURED|DEV_BUSY) {
+                /* ---- a câmera continua: atualiza se está livre ou ocupada ---- */
+                if ((*it)->st < DEV_CAPTURING) {    /* não mexe em câmeras em captura. Antes: '< A|B|C', sempre verdadeiro */
 
-                    switch((*it)->st) {
+                    cur = (*it)->st;
 
-                        case DEV_BUSY:
+                    if (cur == DEV_BUSY || cur == DEV_OPEN || cur == DEV_CONFIGURED) {
 
-                            (*it)->io = check_io_method_busy((*it)->fid);
+                        (*it)->io = cam_probe_io((*it)->fid);
 
-                            if ((*it)->io == ~IO_METHOD_READ) {
+                        if ((*it)->io == CAM_IO_BUSY) {
 
-                                (*it)->st = DEV_BUSY;
-                                update_cam_format((*it));
+                            (*it)->st = DEV_BUSY;
 
-                            }
-                            else {
-
-                                (*it)->st = DEV_OPEN;
-
+                            if (cur != DEV_CONFIGURED) {
+                                update_cam_format((*it));   /* mostra a resolução atual de câmera ocupada */
                             }
 
-                            break;
+                        }
+                        else {
 
-                        case DEV_OPEN:
+                            /* Livre: mantém CONFIGURED se já estava configurada, senão OPEN. */
+                            (*it)->st = (cur == DEV_CONFIGURED) ? DEV_CONFIGURED : DEV_OPEN;
 
-                            (*it)->io = check_io_method_busy((*it)->fid);
-
-                            if ((*it)->io == ~IO_METHOD_READ) {
-
-                                (*it)->st = DEV_BUSY;
-                                update_cam_format((*it));
-
-                            }
-                            else {
-
-                                (*it)->st = DEV_OPEN;
-
-                            }
-                            break;
-
-                        case DEV_CONFIGURED:
-
-                            (*it)->io = check_io_method_busy((*it)->fid);
-
-                            if ((*it)->io == ~IO_METHOD_READ) {
-
-                                (*it)->st = DEV_BUSY;
-
-                            }else {
-
-                                (*it)->st = DEV_CONFIGURED;
-
-                            }
+                        }
                     }
                 }
 
@@ -1061,6 +848,7 @@ int make_camera_list(vector<viod*>& vv) {
             }
         }
 
+        /* ---- câmeras novas: as que a varredura achou e ainda não estão em vv ---- */
         for (i = 0; i < dev_num; i = i + 1) {
 
             if (ck[i] == '\0') {
@@ -1073,6 +861,7 @@ int make_camera_list(vector<viod*>& vv) {
 
     }else {
 
+        /* Lista vazia: toda câmera encontrada é nova. */
         for (i = 0; i < dev_num; i = i + 1) {
 
             add_camera(vv,i);
@@ -1084,7 +873,10 @@ int make_camera_list(vector<viod*>& vv) {
     return 0;
 }
 
-
+/*
+ * Imprime a lista de câmeras cujo estado casa com 'dvst' (DEV_ALL = todas).
+ * Retorna quantas câmeras foram mostradas.
+ */
 int show_camera_list(vector<viod*>& vv, int dvst){
 
     int r;
@@ -1097,7 +889,6 @@ int show_camera_list(vector<viod*>& vv, int dvst){
 
     i = 0;
     cnt = 0;
-    ///printf("\x1b[H\x1b[J");
     SCRCLR();
 
     if (!vv.size()) {
@@ -1113,11 +904,14 @@ int show_camera_list(vector<viod*>& vv, int dvst){
             if (dvst == DEV_ALL || ((*it)->st & dvst) != 0){
 
                 sprintf(name, "/dev/%s%d", prefixes[(*it)->vid.typ], (*it)->vid.num);
-                r = xioctl((*it)->fid,VIDIOC_QUERYCAP,&vcap);
+                r = v4l2c_xioctl((*it)->fid,VIDIOC_QUERYCAP,&vcap);
                 if (r == 0) {
                     printf("  %d: %s: %s, %s, %s\n", i, prefixes[(*it)->vid.typ], name, vcap.card, cam_status[(*it)->st]);
                     cnt = cnt + 1;
                     it++;
+                    i = i + 1;
+                }else{
+                    it++;       /* sem resposta do driver: pula (antes ficava em laço infinito) */
                     i = i + 1;
                 }
 
@@ -1133,172 +927,198 @@ int show_camera_list(vector<viod*>& vv, int dvst){
     return cnt;
 }
 
-
-
+/* Pede a todas as threads de captura que terminem (thon = 0). Não espera por elas. */
 void stop_all_threads(vector<viod*> &vv) {
 
     vector<viod*>::iterator it;
-    vector<viod*>::iterator itf;
 
-    it = vv.begin();
-    itf = vv.end();
-
-    while (it != itf) {
+    for (it = vv.begin(); it != vv.end(); it++) {
 
         (*it)->thon = 0;
-        it++;
 
     }
 
 }
 
-#if(0)
-void get_errno_description() {
+/// ***********************************************************************************
+/// ************* CONTROLES DA CÂMERA EM PERCENTUAL (uma tabela por câmera) *************
+/// ***********************************************************************************
+
+/*
+ * Prepara a tabela da câmera para uso: sincroniza o descritor atual (vd.fid pode ter
+ * mudado se a câmera foi reaberta) e verifica que ele é válido. Quem chama já deve
+ * estar com vd.ctl_mutex travado.
+ */
+static int cam_ctl_prepare(viod &vd) {
+
+    if (vd.fid <= 0)
+        return V4L2CTL_ERR_ARG;         /* câmera não está aberta */
+    vd.ctl.fid = vd.fid;
+    return V4L2C_OK;
 
-    int x;
-
-    switch (errno) {
-
-        case	EPERM:		/* 1	 Operation not permitted */
-
-                x = 1;
-
-        case	ENOENT:		/* 2	 No such file or directory */
-
-                x = 2;
-
-        case	ESRCH:		/* 3	 No such process */
-
-                x = 3;
-
-        case	EINTR:		/* 4	 Interrupted system call */
-
-                x = 0;
-
-        case	EIO: 		/* 5	 I/O error */
-
-                x = 0;
-
-        case	ENXIO:		/* 6	 No such device or address */
-
-                x = 0;
-
-        case	E2BIG:		/* 7	 Argument list too long */
-
-                x = 0;
-
-        case	ENOEXEC:	/* 8	 Exec format error */
-
-                x = 0;
-
-        case	EBADF:		/* 9	 Bad file number */
-
-                x = 0;
-
-        case	ECHILD:		/*10	 No child processes */
-
-                x = 0;
-
-        case	EAGAIN:		/*11	 Try again */
-
-                x = 0;
-
-        case	ENOMEM:		/*12	 Out of memory */
-
-                x = 0;
-
-        case	EACCES:		/*13	 Permission denied */
-
-                x = 0;
-
-        case	EFAULT:		/*14	 Bad address */
-
-                x = 0;
-
-        case	ENOTBLK:	/*15	 Block device required */
-
-                x = 0;
-
-        case	EBUSY:		/*16	 Device or resource busy */
-
-                x = 0;
-
-        case	EEXIST:		/*17	 File exists */
-
-                x = 0;
-
-        case	EXDEV:		/*18	 Cross-device link */
-
-                x = 0;
-
-        case	ENODEV:		/*19	 No such device */
-
-                x = 0;
-
-        case	ENOTDIR:	/*20	 Not a directory */
-
-                x = 0;
-
-        case	EISDIR:		/*21	 Is a directory */
-
-                x = 0;
-
-        case	EINVAL:		/*22	 Invalid argument */
-
-                x = 0;
-
-        case	ENFILE:		/*23	 File table overflow */
-
-                x = 0;
-
-        case	EMFILE:		/*24	 Too many open files */
-
-                x = 0;
-
-        case	ENOTTY:		/*25	 Not a typewriter */
-
-                x = 0;
-
-        case	ETXTBSY:	/*26	 Text file busy */
-
-                x = 0;
-
-        case	EFBIG:		/*27	 File too large */
-
-                x = 0;
-
-        case	ENOSPC:		/*28	 No space left on device */
-
-                x = 0;
-
-        case	ESPIPE:		/*29	 Illegal seek */
-
-                x = 0;
-
-        case	EROFS:		/*30	 Read-only file system */
-
-                x = 0;
-
-        case	EMLINK:		/*31	 Too many links */
-
-                x = 0;
-
-        case	EPIPE:		/*32	 Broken pipe */
-
-                x = 0;
-
-        case	EDOM:		/*33	 Math argument out of domain of func */
-
-                x = 0;
-
-        case	ERANGE:		/*34	 Math result not representable */
-
-                x = 0;
-
-
-    }
-
-    //return 0;
 }
-#endif
 
+/*
+ * Lê do driver os controles desta câmera e monta vd.ctl. Pode ser chamada de novo a
+ * qualquer momento (ex.: depois de reabrir a câmera). Devolve quantos controles achou.
+ */
+int cam_ctl_populate(viod &vd) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);       /* só uma thread mexe na tabela por vez */
+
+    if (vd.fid <= 0)
+        return V4L2CTL_ERR_ARG;
+    return v4l2ctl_populate(&vd.ctl, vd.fid);
+
+}
+
+/* Ajusta o controle "name" para pct por cento da faixa. */
+int cam_ctl_set_pct(viod &vd, const char *name, double pct) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+
+    int idx = v4l2ctl_find_name(&vd.ctl, name);
+    if (idx < 0) return V4L2CTL_ERR_NOFIND;
+    return v4l2ctl_set_pct(&vd.ctl, idx, pct);
+
+}
+
+/* Lê o valor atual do controle "name" como percentual da faixa. */
+int cam_ctl_get_pct(viod &vd, const char *name, double *pct) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+
+    int idx = v4l2ctl_find_name(&vd.ctl, name);
+    if (idx < 0) return V4L2CTL_ERR_NOFIND;
+    return v4l2ctl_get_pct(&vd.ctl, idx, pct);
+
+}
+
+/* Soma delta_pct ao controle "name"; garante andar pelo menos um passo. Devolve o novo % em *new_pct. */
+int cam_ctl_adjust_pct(viod &vd, const char *name, double delta_pct, double *new_pct) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+
+    int idx = v4l2ctl_find_name(&vd.ctl, name);
+    if (idx < 0) return V4L2CTL_ERR_NOFIND;
+    return v4l2ctl_adjust_pct(&vd.ctl, idx, delta_pct, new_pct);
+
+}
+
+/* Devolve o controle "name" ao valor de fábrica. */
+int cam_ctl_reset(viod &vd, const char *name) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+
+    int idx = v4l2ctl_find_name(&vd.ctl, name);
+    if (idx < 0) return V4L2CTL_ERR_NOFIND;
+    return v4l2ctl_reset_default(&vd.ctl, idx);
+
+}
+
+/*
+ * Copia a tabela inteira (já com os últimos valores conhecidos) para 'out'. A interface
+ * lista a cópia sem segurar o mutex, então não atrasa a thread que está ajustando.
+ */
+int cam_ctl_snapshot(viod &vd, v4l2ctl_set *out) {
+
+    if (!out) return V4L2CTL_ERR_ARG;
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    *out = vd.ctl;                                      /* cópia por valor: a estrutura é só dados */
+    return out->n;
+
+}
+
+/*
+ * Propósito: relê do driver valores e flags (ativo/inativo/preso) de TODOS os controles
+ * desta câmera. Necessário depois de qualquer mudança, porque um controle pode ativar ou
+ * desativar outros (ex.: exposição automática libera/bloqueia o tempo de exposição).
+ */
+int cam_ctl_refresh(viod &vd) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+    return v4l2ctl_refresh_all(&vd.ctl);
+
+}
+
+/*
+ * Propósito: soma delta_pct (pode ser negativo) ao controle de índice idx da tabela.
+ * Anda no mínimo um passo (ou um item, se for menu). Nos limites o valor não muda.
+ */
+int cam_ctl_adjust_idx(viod &vd, int idx, double delta_pct) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+    return v4l2ctl_adjust_pct(&vd.ctl, idx, delta_pct, NULL);
+
+}
+
+/*
+ * Propósito: tecla única para controles liga/desliga e menus.
+ *   booleano : inverte o valor.
+ *   botão    : aciona o botão.
+ *   menu     : avança para o próximo item válido; no último volta ao primeiro.
+ * Outros tipos devolvem V4L2CTL_ERR_ARG (use cam_ctl_adjust_idx).
+ */
+int cam_ctl_toggle_idx(viod &vd, int idx) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+    if (idx < 0 || idx >= vd.ctl.n) return V4L2CTL_ERR_INDEX;
+
+    const v4l2ctl_item &it = vd.ctl.it[idx];            /// referência: set_raw atualiza 'cur' na própria tabela
+    __s64 cur;
+    r = v4l2ctl_get_raw(&vd.ctl, idx, &cur);            /// valor real do driver, não o último conhecido
+    if (r < 0) return r;
+
+    if (it.type == V4L2_CTRL_TYPE_BUTTON)
+        return v4l2ctl_trigger(&vd.ctl, idx);           /// botão: o ato de acionar é o efeito
+
+    if (it.type == V4L2_CTRL_TYPE_BOOLEAN)
+        return v4l2ctl_set_raw(&vd.ctl, idx, cur ? 0 : 1);
+
+    if (it.type == V4L2_CTRL_TYPE_MENU || it.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
+        r = v4l2ctl_adjust_pct(&vd.ctl, idx, 100.0, NULL);      /// próximo item válido no sentido de subida
+        if (r < 0) return r;
+        if (vd.ctl.it[idx].cur == cur)                          /// já estava no último: volta ao primeiro
+            return v4l2ctl_set_raw(&vd.ctl, idx, it.min);
+        return V4L2C_OK;
+    }
+    return V4L2CTL_ERR_ARG;
+
+}
+
+/* Propósito: devolver ao valor de fábrica o controle de índice idx. */
+int cam_ctl_reset_idx(viod &vd, int idx) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+    return v4l2ctl_reset_default(&vd.ctl, idx);
+
+}
+
+/*
+ * Propósito: devolver TODOS os controles desta câmera ao valor de fábrica, na ordem certa
+ * (valores, modos, valores). Devolve quantos controles graváveis não voltaram (0 = tudo certo).
+ */
+int cam_ctl_reset_all(viod &vd) {
+
+    std::lock_guard<std::mutex> lk(vd.ctl_mutex);
+    int r = cam_ctl_prepare(vd);
+    if (r < 0) return r;
+    return v4l2ctl_reset_all(&vd.ctl);
+
+}

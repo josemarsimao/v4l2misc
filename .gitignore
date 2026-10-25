@@ -1,0 +1,8 @@
+# Objetos gerados caso a biblioteca seja compilada aqui
+*.o
+*.d
+*.a
+*.so
+
+# Configurações locais do editor
+.vscode/
